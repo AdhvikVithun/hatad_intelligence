@@ -1,5 +1,5 @@
 .llm-monitor {
-  padding: var(--space-3);
+  padding: var(--space-2) var(--space-3) var(--space-3);
 }
 
 .llm-grid {
@@ -9,33 +9,31 @@
 }
 
 .llm-stat {
-  padding: var(--space-2);
+  padding: var(--space-2) var(--space-1);
   text-align: center;
-  background: var(--bg-surface);
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
 }
 
 .llm-stat__value {
   font-family: var(--font-mono);
-  font-size: var(--text-lg);
+  font-size: var(--text-xl);
   font-weight: 700;
   color: var(--text-primary);
+  line-height: 1.2;
 }
 
 .llm-stat__label {
   font-size: 9px;
-  color: var(--text-tertiary);
+  color: var(--text-dim);
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.4px;
   margin-top: 2px;
-  font-family: var(--font-mono);
 }
 
 .live-dot {
   display: inline-block;
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
   border-radius: 50%;
   background: var(--primary);
   animation: pulse 1.5s ease-in-out infinite;
@@ -46,17 +44,17 @@
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
+  padding: var(--space-1) var(--space-2);
   margin-top: var(--space-2);
-  background: var(--primary-bg);
-  border: 1px solid var(--primary-border);
-  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
   font-size: var(--text-xs);
 }
 
 .llm-task__dot {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
   border-radius: 50%;
   background: var(--primary);
   animation: pulse 1s ease-in-out infinite;
@@ -64,32 +62,13 @@
 }
 
 .llm-task__text {
-  color: var(--primary);
-  font-family: var(--font-mono);
+  color: var(--text-secondary);
   font-size: 11px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-/* ── Capabilities ── */
-.llm-caps {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-1);
-  padding: var(--space-2) 0 0;
-}
-
-.cap-badge {
-  padding: 2px 8px;
-  border-radius: var(--radius-full);
-  font-size: 9px;
-  font-family: var(--font-mono);
-  font-weight: 600;
-  letter-spacing: 0.5px;
-}
-
-.cap-badge--schema { background: rgba(59,130,246,0.12); color: #3b82f6; }
-.cap-badge--thinking { background: rgba(168,85,247,0.12); color: #a855f7; }
-.cap-badge--tools { background: rgba(245,158,11,0.12); color: #f59e0b; }
-.cap-badge--rag { background: rgba(16,185,129,0.12); color: #10b981; }
+/* ── Capabilities (unused) ── */
+.llm-caps { display: none; }
+.cap-badge { display: none; }

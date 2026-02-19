@@ -57,12 +57,7 @@ export function TopBar({
             <div className="topbar__metric">
               <span className="material-icons topbar__metric-icon">psychology</span>
               <span className="topbar__metric-value">{pipeline.llmCalls}</span>
-              <span className="topbar__metric-label">calls</span>
-            </div>
-            <div className="topbar__metric">
-              <span className="material-icons topbar__metric-icon">speed</span>
-              <span className="topbar__metric-value">{pipeline.lastLlmSpeed > 0 ? pipeline.lastLlmSpeed.toFixed(0) : '—'}</span>
-              <span className="topbar__metric-label">tok/s</span>
+              <span className="topbar__metric-label">tasks</span>
             </div>
             <div className="topbar__metric">
               <span className="material-icons topbar__metric-icon">timer</span>
@@ -75,7 +70,7 @@ export function TopBar({
       <div className="topbar__right">
         <div className="topbar__indicator">
           <span className={`topbar__dot ${llmOnline ? 'online' : 'offline'}`} />
-          <span>LLM {llmOnline ? 'ONLINE' : 'OFFLINE'}</span>
+          <span>HATAD Engine {llmOnline ? 'ONLINE' : 'OFFLINE'}</span>
         </div>
         <span className="topbar__clock">{clock}</span>
       </div>

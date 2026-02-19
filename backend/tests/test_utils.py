@@ -1699,3 +1699,63 @@ class TestGarbledConfidencePenalty:
         # With garbled Tamil penalty of 0.12/field, garbled names should
         # have a meaningful impact on confidence
         assert conf.score < 1.0  # At least some penalty applied
+
+
+# ═══════════════════════════════════════════════════
+# SURVEY NUMBER HARDENING TESTS
+# ═══════════════════════════════════════════════════
+
+class TestSoilCodeMultiDigitFilter:
+    """Ensure multi-digit soil codes (e.g. '10-3', '4-12') are filtered."""
+
+    def test_single_digit_soil_code_filtered(self):
+        assert split_survey_numbers("4-3") == []
+
+    def test_multi_digit_soil_code_filtered(self):
+        assert split_survey_numbers("10-3") == []
+
+    def test_two_digit_both_sides_filtered(self):
+        assert split_survey_numbers("12-11") == []
+
+    def test_real_survey_with_dash_kept(self):
+        """760-2 has a long base number → kept."""
+        assert split_survey_numbers("760-2") == ["760-2"]
+
+    def test_three_digit_dash_kept(self):
+        """311-1 has 3-digit base → NOT a soil code."""
+        assert split_survey_numbers("311-1") == ["311-1"]
+
+    def test_mixed_soil_and_survey(self):
+        """Soil codes filtered, real surveys kept."""
+        result = split_survey_numbers("10-3, 311/1, 4-2")
+        assert result == ["311/1"]
+
+
+class TestInsertionDigitNoFuzzy:
+    """OCR fuzzy guard: digit insertions should NOT be fuzzy-matched."""
+
+    def test_digit_insertion_no_fuzzy(self):
+        """'31101' vs '311012' — extra digit → mismatch, not OCR fuzzy."""
+        matched, mtype = survey_numbers_match("31101", "311012")
+        assert matched is False
+        assert mtype == "mismatch"
+
+    def test_letter_insertion_still_fuzzy(self):
+        """'31101' vs '31101A' — extra letter → still OCR fuzzy on long strings."""
+        # After normalization: '31101' vs '31101a'
+        # len(na)=5, len(nb)=6, dist=1, extra char is 'a' (letter) → ocr_fuzzy
+        matched, mtype = survey_numbers_match("31101", "31101A")
+        assert matched is True
+        assert mtype == "ocr_fuzzy"
+
+    def test_same_length_letter_change_fuzzy(self):
+        """'3111A' vs '3111B' — letter diff, same length → OCR fuzzy."""
+        matched, mtype = survey_numbers_match("3111A", "3111B")
+        assert matched is True
+        assert mtype == "ocr_fuzzy"
+
+    def test_same_length_digit_change_mismatch(self):
+        """'31101' vs '31102' — digit diff, same length → mismatch."""
+        matched, mtype = survey_numbers_match("31101", "31102")
+        assert matched is False
+        assert mtype == "mismatch"

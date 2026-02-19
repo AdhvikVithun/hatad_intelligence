@@ -2,39 +2,37 @@
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: var(--space-2);
-  padding: var(--space-3);
+  padding: var(--space-2) var(--space-3) var(--space-3);
 }
 
 .knowledge-stat {
   text-align: center;
-  padding: var(--space-2);
-  background: var(--bg-surface);
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border-subtle);
+  padding: var(--space-2) var(--space-1);
+  border-radius: var(--radius-sm);
 }
 
 .knowledge-stat__value {
   font-family: var(--font-mono);
-  font-size: var(--text-base);
+  font-size: var(--text-lg);
   font-weight: 700;
   color: var(--text-primary);
+  line-height: 1.2;
 }
 
 .knowledge-stat__label {
   font-size: 9px;
-  color: var(--text-tertiary);
+  color: var(--text-dim);
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.4px;
   margin-top: 2px;
-  font-family: var(--font-mono);
 }
 
 .knowledge-alert {
-  margin: 0 var(--space-3) var(--space-3);
-  padding: var(--space-2) var(--space-3);
+  margin: 0 var(--space-3) var(--space-2);
+  padding: var(--space-1) var(--space-2);
   background: var(--red-bg);
-  border: 1px solid var(--red);
-  border-radius: var(--radius-md);
+  border: 1px solid rgba(239, 68, 68, 0.15);
+  border-radius: var(--radius-sm);
   font-size: var(--text-xs);
   color: var(--red);
   text-align: center;

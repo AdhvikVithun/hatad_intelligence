@@ -385,6 +385,18 @@ def survey_numbers_match(a: str, b: str) -> tuple[bool, str]:
                     # it's a real subdivision difference, not OCR noise
                     if na[pos].isdigit() and nb[pos].isdigit():
                         return (False, "mismatch")
+            else:
+                # Insertion / deletion: lengths differ by 1.
+                # If the extra character is a digit, it's a real
+                # subdivision difference (e.g. "311/1" vs "311/12"),
+                # NOT OCR noise — reject the fuzzy match.
+                longer, shorter = (na, nb) if len(na) > len(nb) else (nb, na)
+                for i, ch in enumerate(longer):
+                    candidate = longer[:i] + longer[i+1:]
+                    if candidate == shorter:
+                        if ch.isdigit():
+                            return (False, "mismatch")
+                        break
             return (True, "ocr_fuzzy")
 
     return (False, "mismatch")
@@ -411,10 +423,10 @@ def split_survey_numbers(raw: str) -> list[str]:
         p = p.strip()
         if not p:
             continue
-        # Skip Patta soil classification codes: single digit-dash-digit patterns
-        # like "4-3", "3-2", "1-1" that are NOT survey numbers.
+        # Skip Patta soil classification codes: digit-dash-digit patterns
+        # like "4-3", "3-2", "1-1", "10-3" that are NOT survey numbers.
         # Real survey numbers with dashes have longer base numbers (e.g., "760-2").
-        if re.match(r'^\d-\d$', p):
+        if re.match(r'^\d{1,2}-\d{1,2}$', p):
             continue
         # Extract just the survey number portion: digits followed by optional /- and more digits/letters
         # This strips trailing extent/area data like "2.0011" or "50|17|1"

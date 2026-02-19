@@ -58,32 +58,27 @@ def _find_binary(candidates: list[str], name: str) -> str | None:
     return None
 
 
-def _init_ocr() -> bool:
-    """Lazy-initialize Tesseract + poppler.  Returns True if OCR is available."""
-    global _ocr_available, _poppler_path
-    if hasattr(_init_ocr, "_done"):
-        return _ocr_available
+def _init_poppler() -> bool:
+    """Lazy-initialize poppler (pdf2image) for page rendering.
 
-    _init_ocr._done = True
-    _ocr_available = False
+    Separated from Tesseract so that vision-based classification and
+    extraction can render PDF pages even when Tesseract is not installed.
+    """
+    global _poppler_available, _poppler_path
+    if hasattr(_init_poppler, "_done"):
+        return _poppler_available
+
+    _init_poppler._done = True
+    _poppler_available = False
     _poppler_path = None
 
     try:
-        import pytesseract  # noqa: F401
         from pdf2image import convert_from_path  # noqa: F401
 
-        tess_cmd = _find_binary(_TESSERACT_CANDIDATES, "tesseract")
-        if not tess_cmd:
-            logger.warning("Tesseract binary not found — OCR fallback disabled")
-            return False
-        pytesseract.pytesseract.tesseract_cmd = tess_cmd
-
-        _poppler_path = None
         for candidate in _POPPLER_CANDIDATES:
             if not candidate:
                 continue
             p = Path(candidate)
-            # Candidate could be a directory containing pdftoppm, or pdftoppm itself
             if p.is_dir() and (p / "pdftoppm.exe").exists():
                 _poppler_path = str(p)
                 break
@@ -94,20 +89,57 @@ def _init_ocr() -> bool:
                 _poppler_path = str(p.parent)
                 break
 
-        # Quick smoke test
+        logger.info(f"Poppler (pdf2image) ready (poppler_path={_poppler_path})")
+        _poppler_available = True
+        return True
+
+    except ImportError as e:
+        logger.warning(f"pdf2image not installed ({e}) — page rendering disabled")
+        return False
+    except Exception as e:
+        logger.warning(f"Poppler initialization failed: {e} — page rendering disabled")
+        return False
+
+
+def _init_ocr() -> bool:
+    """Lazy-initialize Tesseract OCR.  Returns True if OCR is available.
+
+    Requires both pytesseract and poppler (via _init_poppler).
+    """
+    global _ocr_available
+    if hasattr(_init_ocr, "_done"):
+        return _ocr_available
+
+    _init_ocr._done = True
+    _ocr_available = False
+
+    # Poppler must be available first (shared with render_pages_as_images)
+    if not _init_poppler():
+        return False
+
+    try:
+        import pytesseract  # noqa: F401
+
+        tess_cmd = _find_binary(_TESSERACT_CANDIDATES, "tesseract")
+        if not tess_cmd:
+            logger.warning("Tesseract binary not found — OCR fallback disabled")
+            return False
+        pytesseract.pytesseract.tesseract_cmd = tess_cmd
+
         version = pytesseract.get_tesseract_version()
-        logger.info(f"Tesseract OCR v{version} ready (cmd={tess_cmd}, poppler={_poppler_path})")
+        logger.info(f"Tesseract OCR v{version} ready (cmd={tess_cmd})")
         _ocr_available = True
         return True
 
     except ImportError as e:
-        logger.warning(f"OCR dependencies not installed ({e}) — OCR fallback disabled")
+        logger.warning(f"pytesseract not installed ({e}) — OCR fallback disabled")
         return False
     except Exception as e:
         logger.warning(f"OCR initialization failed: {e} — OCR fallback disabled")
         return False
 
 
+_poppler_available = False
 _ocr_available = False
 _poppler_path = None
 
@@ -624,7 +656,7 @@ def render_pages_as_images(file_path: Path, dpi: int = 200) -> list[str]:
     if cache_key in _image_cache:
         logger.debug(f"Image cache hit for {file_path.name} (dpi={dpi})")
         return _image_cache[cache_key]
-    if not _init_ocr():
+    if not _init_poppler():
         raise RuntimeError(
             "Vision extraction requires poppler (pdf2image). "
             "Install poppler and ensure it is in PATH or set POPPLER_PATH."

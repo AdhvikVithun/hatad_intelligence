@@ -93,7 +93,7 @@ export function Sidebar({
             disabled={!llmOnline}
           >
             <span className="material-icons" style={{ fontSize: 16, marginRight: 6 }}>play_arrow</span>
-            {llmOnline ? `Analyze ${files.length} Document(s)` : 'LLM Offline'}
+            {llmOnline ? `Analyze ${files.length} Document(s)` : 'Engine Offline'}
           </button>
         )}
 

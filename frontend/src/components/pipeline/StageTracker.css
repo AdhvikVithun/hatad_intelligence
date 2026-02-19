@@ -1,12 +1,20 @@
-/* ═══ Stage Tracker ═══ */
+/* ═══ Stage Tracker — refined ═══ */
+
 .stage-tracker {
-  padding: var(--space-5) var(--space-5) var(--space-4);
-  background: var(--bg-secondary);
+  padding: var(--space-4) var(--space-5);
+  background: var(--bg-primary);
   border: 1px solid var(--border-primary);
   border-radius: var(--radius-lg);
-  margin-bottom: var(--space-4);
+  box-shadow: var(--shadow-sm);
+  transition: border-color 0.5s ease, box-shadow 0.5s ease;
 }
 
+.stage-tracker--complete {
+  border-color: var(--border-primary);
+  box-shadow: var(--shadow-sm);
+}
+
+/* ── Header ── */
 .stage-tracker__header {
   display: flex;
   align-items: center;
@@ -14,112 +22,238 @@
   margin-bottom: var(--space-4);
 }
 
+.stage-tracker__brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.stage-tracker__brand-icon {
+  font-size: 15px;
+  color: var(--primary);
+}
+.stage-tracker--complete .stage-tracker__brand-icon {
+  color: var(--green);
+}
+
 .stage-tracker__label {
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 700;
-  letter-spacing: 2px;
+  letter-spacing: 1.6px;
   color: var(--text-tertiary);
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
+}
+
+.stage-tracker__right {
+  display: flex;
+  align-items: center;
 }
 
 .stage-tracker__progress {
   font-size: 10px;
-  color: var(--text-tertiary);
+  color: var(--text-dim);
   font-family: var(--font-mono);
   letter-spacing: 0.5px;
 }
 
-/* ── Rail (nodes + line) ── */
+.stage-tracker__done-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  background: var(--green-bg);
+  border-radius: var(--radius-full);
+  color: var(--green);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  font-family: var(--font-sans);
+}
+
+/* ── Rail ── */
 .stage-tracker__rail {
   position: relative;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  padding: 0 var(--space-2);
+  padding: 0 var(--space-1);
 }
 
-/* ── Background line behind nodes ── */
+/* ── Connector line ── */
 .stage-rail__line {
   position: absolute;
-  top: 15px;                    /* center of the 30px circle */
-  left: var(--space-4);
-  right: var(--space-4);
+  top: 13px;                    /* vertically center in 26px circle */
+  left: 28px;
+  right: 28px;
   height: 2px;
-  background: var(--border-primary);
+  background: var(--border-subtle);
   z-index: 0;
   border-radius: 1px;
 }
 
 .stage-rail__fill {
   height: 100%;
-  background: var(--green);
+  background: linear-gradient(90deg, var(--green) 0%, #34d399 100%);
   border-radius: 1px;
-  transition: width 0.6s ease;
+  transition: width 0.8s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-/* ── Individual node ── */
+/* ── Node ── */
 .stage-node {
   position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
   z-index: 1;
-  min-width: 56px;
+  width: 72px;
 }
 
 .stage-node__circle {
-  width: 30px;
-  height: 30px;
+  width: 26px;
+  height: 26px;
   display: flex;
   align-items: center;
   justify-content: center;
   border-radius: 50%;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 700;
   border: 2px solid var(--border-primary);
-  color: var(--text-tertiary);
+  color: var(--text-dim);
   background: var(--bg-primary);
   transition: all 0.4s ease;
   position: relative;
   z-index: 2;
 }
 
-/* ── Done state ── */
+.stage-node__icon {
+  font-size: 13px;
+}
+
+.stage-node__check {
+  font-size: 14px;
+}
+
+/* ── Pending ── */
+.stage-node--pending .stage-node__circle {
+  border-color: var(--border-subtle);
+  background: var(--bg-surface);
+}
+.stage-node--pending .stage-node__icon {
+  color: var(--text-dim);
+}
+
+/* ── Done ── */
 .stage-node--done .stage-node__circle {
   border-color: var(--green);
   color: #fff;
   background: var(--green);
-  box-shadow: 0 0 8px rgba(16, 185, 129, 0.25);
+  box-shadow: none;
 }
 
-/* ── Active / processing state ── */
+/* ── Active ── */
 .stage-node--active .stage-node__circle {
   border-color: var(--primary);
   color: var(--primary);
   background: var(--primary-bg);
-  box-shadow: 0 0 10px rgba(19, 91, 236, 0.2);
-  animation: stagePulse 2s ease-in-out infinite;
+  box-shadow: 0 0 0 3px rgba(19, 91, 236, 0.08);
+  animation: stagePulse 2.5s ease-in-out infinite;
 }
 
 /* ── Labels ── */
 .stage-node__label {
   font-size: 9px;
   font-weight: 600;
-  letter-spacing: 0.8px;
-  color: var(--text-tertiary);
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
   margin-top: 6px;
   text-align: center;
   white-space: nowrap;
   text-transform: uppercase;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
 }
 
-.stage-node--done  .stage-node__label { color: var(--green); }
-.stage-node--active .stage-node__label { color: var(--primary); }
+.stage-node__desc {
+  font-size: 8px;
+  color: var(--text-dim);
+  text-align: center;
+  margin-top: 2px;
+  white-space: nowrap;
+  font-family: var(--font-sans);
+  line-height: 1.2;
+  letter-spacing: 0.2px;
+  opacity: 0.7;
+}
 
-/* ── Keyframe ── */
+.stage-node--done .stage-node__label { color: var(--text-secondary); }
+.stage-node--done .stage-node__desc  { color: var(--text-tertiary); opacity: 0.7; }
+.stage-node--active .stage-node__label { color: var(--primary); }
+.stage-node--active .stage-node__desc  { color: var(--primary-light); }
+
+/* ── Keyframes ── */
 @keyframes stagePulse {
-  0%, 100% { box-shadow: 0 0 6px rgba(19, 91, 236, 0.15); }
-  50%      { box-shadow: 0 0 16px rgba(19, 91, 236, 0.35); }
+  0%, 100% { box-shadow: 0 0 0 4px rgba(19, 91, 236, 0.08); }
+  50%      { box-shadow: 0 0 0 8px rgba(19, 91, 236, 0.15); }
+}
+
+/* ── Active‑stage detail banner ── */
+.stage-detail {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+  padding: var(--space-2) var(--space-3);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  animation: fadeSlideIn 0.4s ease-out;
+}
+
+.stage-detail__icon-wrap {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  background: var(--primary-bg);
+  flex-shrink: 0;
+}
+
+.stage-detail__icon {
+  font-size: 16px;
+  color: var(--primary);
+}
+
+.stage-detail__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.stage-detail__name {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--primary);
+  letter-spacing: 0.3px;
+  font-family: var(--font-sans);
+}
+
+.stage-detail__desc {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+.stage-detail__pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--primary);
+  animation: pulse 1.5s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+@keyframes fadeSlideIn {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: translateY(0); }
 }

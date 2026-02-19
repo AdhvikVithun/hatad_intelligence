@@ -1,5 +1,6 @@
 import type { PipelineState, ProgressEntry } from '../../types';
 import { StageTracker } from './StageTracker';
+import { StageCards } from './StageCards';
 import { VerifyMatrix } from './VerifyMatrix';
 import { LLMMonitor } from './LLMMonitor';
 import { KnowledgeMonitor } from './KnowledgeMonitor';
@@ -31,8 +32,13 @@ export function PipelineView({
 }: Props) {
   return (
     <div className="pipeline-view">
+      {/* ── Stage progress rail ── */}
       <StageTracker pipeline={pipeline} />
 
+      {/* ── HATAD engine module cards ── */}
+      <StageCards pipeline={pipeline} progress={progress} processing={processing} />
+
+      {/* ── Two-column detail area ── */}
       <div className="pipeline-columns">
         <div className="pipeline-col-left">
           <VerifyMatrix pipeline={pipeline} />
@@ -44,25 +50,26 @@ export function PipelineView({
         </div>
       </div>
 
-      {/* Result Bar */}
+      {/* ── Result Bar ── */}
       {!processing && session && riskScore !== null && (
         <div className="pipeline-result">
           <div className="pipeline-result__score" style={{ color: riskColor }}>
             <span className="pipeline-result__num">{riskScore}</span>
-            <span className="pipeline-result__label">/100 RISK SCORE</span>
+            <span className="pipeline-result__label">/100</span>
           </div>
-          <div className="pipeline-result__band" style={{ background: riskColor, color: '#000' }}>
+          <div className="pipeline-result__band" style={{ background: riskColor }}>
             {riskBand}
           </div>
+          <div className="pipeline-result__divider" />
           <div className="pipeline-result__stats">
-            <span className="rs pass">{passCount} PASS</span>
-            <span className="rs fail">{failCount} FAIL</span>
-            <span className="rs warn">{warnCount} WARN</span>
+            <span className="rs pass">{passCount} pass</span>
+            <span className="rs fail">{failCount} fail</span>
+            <span className="rs warn">{warnCount} warn</span>
           </div>
+          <div className="pipeline-result__divider" />
           <div className="pipeline-result__stats">
-            <span className="rs">{pipeline.llmCalls} LLM calls</span>
-            <span className="rs">{pipeline.totalLlmTime.toFixed(0)}s LLM time</span>
-            <span className="rs">{formatDuration(elapsed)} total</span>
+            <span className="rs">{pipeline.llmCalls} tasks</span>
+            <span className="rs">{formatDuration(elapsed)}</span>
           </div>
         </div>
       )}

@@ -903,8 +903,19 @@ def check_survey_number_consistency(extracted_data: dict) -> list[dict]:
             # Check property description for survey no
             prop_desc = d.get("property_description", "")
             match = re.search(
-                r'(?:survey|s\.?f?\.?no\.?|r\.?s\.?no\.?|sy\.?\s*no\.?)\s*:?\s*([\d/\-A-Za-z,\s]+)',
-                prop_desc, re.IGNORECASE
+                r'(?:'
+                r's\.?f\.?\s*no\.?|'          # S.F.No., SF No
+                r'r\.?s\.?\s*no\.?|'          # R.S.No.
+                r't\.?s\.?\s*no\.?|'          # T.S.No.
+                r'o\.?s\.?\s*no\.?|'          # O.S.No.
+                r'n\.?s\.?\s*no\.?|'          # N.S.No.
+                r's\.?no\.?|'                 # S.No., SNo
+                r'survey\s*no\.?|'            # Survey No
+                r'sy\.?\s*no\.?|'             # Sy.No.
+                r'\u0BAA\u0BC1\u0BB2\s*\u0B8E\u0BA3\u0BCD\.?|'   # புல எண் (Tamil)
+                r'\u0BA8\u0BBF\u0BB2\s*\u0B8E\u0BA3\u0BCD\.?'    # நில எண் (Tamil)
+                r')\s*:?\s*([\d/\-A-Za-z,\s]+)',
+                prop_desc, re.IGNORECASE | re.UNICODE
             )
             if match:
                 for sn in split_survey_numbers(match.group(1).strip()):
@@ -918,6 +929,52 @@ def check_survey_number_consistency(extracted_data: dict) -> list[dict]:
                     survey_records.append((sn, _normalize_survey_number(sn), filename, extract_survey_type(sn)))
 
     _trace(f"SURVEY_CHECK {len(survey_records)} records: {[(orig,fn) for orig,_,_,fn in survey_records]}")
+
+    # ── Intra-EC consistency: header vs transactions ──
+    # If a single EC's property_description survey differs from its
+    # transaction survey numbers, flag an internal inconsistency.
+    ec_files: dict[str, list[tuple[str, str]]] = {}  # filename → [(orig, norm)]
+    for orig, norm, fn, _st in survey_records:
+        # Only look at EC-sourced records
+        for _filename, _data in extracted_data.items():
+            if _filename == fn and _data.get("document_type") == "EC":
+                ec_files.setdefault(fn, []).append((orig, norm))
+                break
+    for fn, recs in ec_files.items():
+        if len(recs) < 2:
+            continue
+        # Build mini-clusters within this single EC
+        ec_clusters: list[list[str]] = []
+        for orig, _norm in recs:
+            placed = False
+            for ecl in ec_clusters:
+                for existing in ecl:
+                    m, _mt = survey_numbers_match(orig, existing)
+                    if m:
+                        ecl.append(orig)
+                        placed = True
+                        break
+                if placed:
+                    break
+            if not placed:
+                ec_clusters.append([orig])
+        if len(ec_clusters) > 1:
+            groups = " vs ".join(
+                "{" + ", ".join(sorted(set(cl))) + "}" for cl in ec_clusters[:4]
+            )
+            checks.append(_make_check(
+                "DET_EC_INTERNAL_SURVEY_INCONSISTENCY",
+                "EC Internal Survey Number Inconsistency",
+                "HIGH", "WARNING",
+                f"Within the same EC ({fn}), the property description and "
+                f"transaction entries reference {len(ec_clusters)} distinct "
+                f"survey number groups: {groups}. This may indicate OCR errors, "
+                f"a multi-property EC, or data extraction issues.",
+                "Compare against the original EC document to confirm which "
+                "survey numbers actually appear.",
+                f"{fn}: {groups}",
+            ))
+
     if len(survey_records) < 2:
         return checks
 

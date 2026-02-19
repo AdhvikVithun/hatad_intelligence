@@ -161,14 +161,14 @@ export interface SessionHistoryItem {
 
 // Constants
 export const PIPELINE_STAGES = [
-  { id: 'extraction', label: 'EXTRACT', short: '1', desc: 'PDF Text Extraction' },
-  { id: 'classification', label: 'CLASSIFY', short: '2', desc: 'AI Document Classification' },
-  { id: 'data_extraction', label: 'PARSE', short: '3', desc: 'Structured Data Extraction' },
-  { id: 'knowledge', label: 'KNOWLEDGE', short: '4', desc: 'Memory & Document Knowledge' },
-  { id: 'summarization', label: 'COMPRESS', short: '5', desc: 'Document Summarization' },
-  { id: 'verification', label: 'VERIFY', short: '6', desc: 'Multi-Pass Verification' },
-  { id: 'report', label: 'REPORT', short: '7', desc: 'Narrative Report' },
-  { id: 'complete', label: 'DONE', short: '✓', desc: 'Analysis Complete' },
+  { id: 'extraction',      label: 'SCAN',      short: '1', desc: 'Document Scanning',         detail: 'HATAD OCR is reading and digitising your documents page by page.' },
+  { id: 'classification',  label: 'IDENTIFY',  short: '2', desc: 'Document Identification',   detail: 'HATAD Intelligence is identifying each document type — Sale Deed, EC, Patta, and more.' },
+  { id: 'data_extraction', label: 'ANALYSE',   short: '3', desc: 'Data Extraction',           detail: 'HATAD Intelligence is extracting key fields — names, survey numbers, dates, and amounts.' },
+  { id: 'knowledge',       label: 'CONNECT',   short: '4', desc: 'Cross-Reference',           detail: 'Building a knowledge graph to cross-reference facts across all your documents.' },
+  { id: 'summarization',   label: 'SUMMARISE', short: '5', desc: 'Document Summarisation',    detail: 'Compressing document data into concise summaries for verification.' },
+  { id: 'verification',    label: 'VERIFY',    short: '6', desc: 'Due Diligence Checks',      detail: 'Running multi-pass verification — ownership chains, encumbrances, and cross-document consistency.' },
+  { id: 'report',          label: 'REPORT',    short: '7', desc: 'Report Generation',         detail: 'Generating your comprehensive due diligence narrative report.' },
+  { id: 'complete',        label: 'DONE',      short: '✓', desc: 'Analysis Complete',         detail: 'All checks are complete. Review your results below.' },
 ] as const;
 
 export const VERIFY_GROUPS = [

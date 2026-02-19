@@ -1,12 +1,12 @@
 """Pipeline orchestrator - coordinates the full analysis workflow.
 
-Multi-pass architecture:
-  Stage 1 → Text extraction (pdfplumber)
-  Stage 2 → Document classification (LLM)
-  Stage 3 → Structured data extraction (LLM, chunked)
+Text-only architecture (Sarvam OCR + GPT-OSS):
+  Stage 1  → Text extraction (pdfplumber + Sarvam AI Tamil OCR)
+  Stage 2  → Document classification (GPT-OSS)
+  Stage 3  → Structured data extraction (GPT-OSS, chunked)
   Stage 3.5 → Document summarization (trim large payloads)
-  Stage 4 → Multi-pass verification (5 focused LLM calls)
-  Stage 5 → Narrative report (LLM, compact input)
+  Stage 4  → Multi-pass verification (5 focused LLM calls)
+  Stage 5  → Narrative report (LLM, compact input)
 """
 
 import json
@@ -21,18 +21,18 @@ from pathlib import Path
 from typing import AsyncGenerator
 
 from app.config import (UPLOAD_DIR, SESSIONS_DIR, PROMPTS_DIR, RAG_ENABLED,
-                        LLM_MAX_CONCURRENT_CHUNKS, VISION_DOC_TYPES,
+                        LLM_MAX_CONCURRENT_CHUNKS,
                         SARVAM_ENABLED)
 from app.pipeline.ingestion import extract_text_from_pdf
-from app.pipeline.sarvam_ocr import sarvam_extract_text, merge_sarvam_with_pdfplumber, run_sarvam_on_pages
+from app.pipeline.sarvam_ocr import sarvam_extract_text, merge_sarvam_with_pdfplumber
 from app.pipeline.classifier import classify_document
 from app.pipeline.llm_client import call_llm, LLMProgressCallback
 from app.pipeline.summarizer import summarize_document, build_compact_summary
 from app.pipeline.memory_bank import MemoryBank
 from app.pipeline.extractors.ec import ECExtractor
-from app.pipeline.extractors.patta import PattaExtractor, VisionPattaExtractor
-from app.pipeline.extractors.sale_deed import SaleDeedExtractor, VisionSaleDeedExtractor
-from app.pipeline.extractors.generic import GenericExtractor, VisionGenericExtractor
+from app.pipeline.extractors.patta import PattaExtractor
+from app.pipeline.extractors.sale_deed import SaleDeedExtractor
+from app.pipeline.extractors.generic import GenericExtractor
 from app.pipeline.extractors.base import TextPrimaryExtractor
 from app.pipeline.schemas import (VERIFY_GROUP_SCHEMAS, EXTRACT_PATTA_SCHEMA,
                                    EXTRACT_SALE_DEED_SCHEMA, EXTRACT_GENERIC_SCHEMA)
@@ -45,30 +45,26 @@ from app.pipeline.identity import IdentityResolver, _ROLE_LABELS as _ID_ROLE_LAB
 
 logger = logging.getLogger(__name__)
 
-# Extractor registry — TEXT-PRIMARY with confidence-gated vision fallback.
-# GPT-OSS (gpt-oss:20b) does the primary extraction using OCR text.
-# Qwen3-VL (qwen3-vl:8b) is called ONLY when GPT's confidence is low.
+# Extractor registry — TEXT-ONLY pipeline.
+# Sarvam AI provides high-quality Tamil OCR text.
+# GPT-OSS (gpt-oss:20b) does ALL extraction/reasoning from text.
 EXTRACTORS = {
     "EC": ECExtractor(),                     # Text-only (large tabular docs, 65+ pages)
     "PATTA": TextPrimaryExtractor(
         text_extractor=PattaExtractor(),
-        vision_extractor=VisionPattaExtractor(),
         schema=EXTRACT_PATTA_SCHEMA,
     ),
     "CHITTA": TextPrimaryExtractor(
         text_extractor=PattaExtractor(),
-        vision_extractor=VisionPattaExtractor(),
         schema=EXTRACT_PATTA_SCHEMA,
     ),
     "SALE_DEED": TextPrimaryExtractor(
         text_extractor=SaleDeedExtractor(),
-        vision_extractor=VisionSaleDeedExtractor(),
         schema=EXTRACT_SALE_DEED_SCHEMA,
     ),
 }
-DEFAULT_EXTRACTOR = TextPrimaryExtractor(     # Text-primary for all other types
+DEFAULT_EXTRACTOR = TextPrimaryExtractor(     # Text-only for all other types
     text_extractor=GenericExtractor(),
-    vision_extractor=VisionGenericExtractor(),
     schema=EXTRACT_GENERIC_SCHEMA,
 )
 
@@ -237,9 +233,8 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
         file_path_map = {}  # filename → Path for vision extractors
         for fp in file_paths:
             session._log("extraction", f"Processing {fp.name}...")
-            # Vision-first: skip OCR during ingestion — vision model reads
-            # PDF images directly, so Tesseract is redundant for non-EC docs.
-            # OCR runs lazily later only for EC documents.
+            # Extract text via pdfplumber (fast, layout-preserving).
+            # Sarvam AI OCR enhances Tamil text quality in Stage 1b.
             text_data = extract_text_from_pdf(fp, skip_ocr=True)
             extracted_texts[fp.name] = text_data
             file_path_map[fp.name] = fp  # Track original file path
@@ -247,7 +242,7 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
             extraction_quality = text_data.get("extraction_quality", "HIGH")
             quality_note = ""
             if extraction_quality in ("LOW", "EMPTY"):
-                quality_note = " (vision model will handle extraction)"
+                quality_note = " (Sarvam OCR will enhance in Stage 1b)"
 
             session.documents.append({
                 "filename": fp.name,
@@ -261,10 +256,10 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
             yield _update(session, "extraction", 
                          f"Extracted {text_data['total_pages']} pages from {fp.name}{quality_note}")
 
-        # ── Stage 1b: Sarvam AI parallel OCR (when enabled) ──
+        # ── Stage 1b: HATAD Vision parallel OCR (when enabled) ──
         if SARVAM_ENABLED:
             yield _update(session, "extraction",
-                         "Sarvam AI: uploading documents for Tamil-optimised OCR...")
+                         "HATAD Vision: uploading documents for Tamil-optimised OCR...")
 
             async def _sarvam_one(fname, fpath):
                 return fname, await sarvam_extract_text(fpath, on_progress=_llm_progress)
@@ -276,13 +271,13 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
 
             for result in sarvam_results:
                 if isinstance(result, Exception):
-                    logger.error(f"Sarvam AI extraction error: {result}")
+                    logger.error(f"HATAD Vision extraction error: {result}")
                     continue
                 fname, sarvam_data = result
                 if sarvam_data is None:
                     continue
 
-                # Merge Sarvam with existing pdfplumber result
+                # Merge HATAD Vision with existing pdfplumber result
                 pdfplumber_data = extracted_texts[fname]
                 merged = merge_sarvam_with_pdfplumber(sarvam_data, pdfplumber_data)
                 extracted_texts[fname] = merged
@@ -296,16 +291,16 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                             doc["extraction_quality"] = merged["extraction_quality"]
                             break
                     yield _update(session, "extraction",
-                                 f"Sarvam AI: {sarvam_used}/{merged['total_pages']} pages "
+                                 f"HATAD Vision: {sarvam_used}/{merged['total_pages']} pages "
                                  f"enhanced for {fname}")
 
-            # Flush any LLM-style progress from sarvam callbacks
+            # Flush any LLM-style progress from HATAD Vision callbacks
             for upd in llm_updates:
                 yield upd
             llm_updates.clear()
 
         # ═══════════════════════════════════════════
-        # STAGE 2: DOCUMENT CLASSIFICATION (parallel — all use vision model)
+        # STAGE 2: DOCUMENT CLASSIFICATION (parallel — GPT-OSS text classification)
         # ═══════════════════════════════════════════
         yield _update(session, "classification", "Classifying documents with AI...", save=True)
 
@@ -316,7 +311,7 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                 file_path=file_path_map.get(fname),
             )
 
-        # Run all classifications concurrently (all use qwen3-vl → no model switching)
+        # Run all classifications concurrently
         classify_tasks = [_classify_one(fn, td) for fn, td in extracted_texts.items()]
         classify_results = await asyncio.gather(*classify_tasks, return_exceptions=True)
 
@@ -341,10 +336,8 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
 
         # ═══════════════════════════════════════════
         # STAGE 3: STRUCTURED DATA EXTRACTION
-        # Text-primary architecture: GPT-OSS extracts from OCR text first.
-        # If confidence is low, Qwen3-VL scans the PDF images as a fallback.
-        # Vision fallback is sequential (VISION_MAX_CONCURRENT=1) to avoid
-        # GPU queue timeouts on single-GPU setups.
+        # Text-only architecture: Sarvam provides OCR text,
+        # GPT-OSS does all extraction/reasoning from that text.
         # ═══════════════════════════════════════════
         yield _update(session, "data_extraction", "Extracting structured data from each document...", save=True)
 
@@ -353,45 +346,9 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
             filename = doc["filename"]
             text_data = extracted_texts[filename]
 
-            # Lazy OCR: enhance text quality for ANY doc type with LOW/MIXED quality
-            # (previously only EC got this — now all docs benefit since GPT-OSS reads text)
-            # Skip pages already enhanced by Sarvam AI — no point re-OCR'ing them.
-            if text_data.get("extraction_quality") in ("LOW", "MIXED"):
-                # Check if Sarvam already handled most pages
-                sarvam_page_count = sum(
-                    1 for p in text_data.get("pages", [])
-                    if p.get("extraction_method") == "sarvam"
-                )
-                total_page_count = len(text_data.get("pages", []))
-                non_sarvam_low = sum(
-                    1 for p in text_data.get("pages", [])
-                    if p.get("extraction_method") != "sarvam"
-                    and p.get("quality", {}).get("quality") == "LOW"
-                )
-                if non_sarvam_low > 0:
-                    yield _update(session, "data_extraction",
-                                 f"Running Sarvam OCR on {filename} "
-                                 f"({non_sarvam_low} low-quality pages, quality: {text_data.get('extraction_quality')})...")
-                    fp = file_path_map.get(filename)
-                    if fp:
-                        text_data = await run_sarvam_on_pages(fp, text_data, on_progress=_llm_progress)
-                        extracted_texts[filename] = text_data
-                        sarvam_enhanced = text_data.get("sarvam_pages", 0)
-                        if sarvam_enhanced:
-                            yield _update(session, "data_extraction",
-                                         f"Sarvam AI enhanced {sarvam_enhanced} pages for {filename}")
-                elif sarvam_page_count > 0:
-                    yield _update(session, "data_extraction",
-                                 f"Skipping OCR for {filename} — "
-                                 f"{sarvam_page_count}/{total_page_count} pages already enhanced by Sarvam AI")
-
-            # Tag text_data with doc_type so TextPrimaryExtractor can check
-            # VISION_DOC_TYPES eligibility inside its confidence logic
-            text_data["_doc_type"] = doc_type
-
             extractor = EXTRACTORS.get(doc_type, DEFAULT_EXTRACTOR)
             yield _update(session, "data_extraction",
-                         f"Analyzing {filename} as {doc_type} (text-primary)...")
+                         f"Analyzing {filename} as {doc_type} (GPT-OSS)...")
             try:
                 extracted = await extractor.extract(
                     text_data, on_progress=_llm_progress,
@@ -407,19 +364,11 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                     "data": extracted,
                 }
 
-                # Report extraction method
-                method = "text"
+                # Report extraction confidence
                 if isinstance(extracted, dict):
-                    method = extracted.get("_extraction_method", "text")
                     conf = extracted.get("_confidence", "N/A")
-                    if method == "text+vision":
-                        yield _update(session, "data_extraction",
-                                     f"Extracted {filename}: text+vision fallback "
-                                     f"(confidence was {conf})")
-                    else:
-                        yield _update(session, "data_extraction",
-                                     f"Extracted {filename}: text-only "
-                                     f"(confidence: {conf})")
+                    yield _update(session, "data_extraction",
+                                 f"Extracted {filename} (confidence: {conf})")
                 else:
                     yield _update(session, "data_extraction",
                                  f"Extracted structured data from {filename}")
@@ -519,11 +468,10 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
             if not content:
                 continue
 
-            # Text-primary extracted docs that used vision fallback merge are
-            # already compact structured JSON — skip the LLM summarization call.
-            # Also skip if extraction came out very small.
+            # Skip LLM summarization for already-compact outputs
             extraction_method = content.get("_extraction_method", "") if isinstance(content, dict) else ""
-            if extraction_method == "text+vision" or doc_type in VISION_DOC_TYPES and extraction_method == "":
+            content_size = len(json.dumps(content, default=str)) if isinstance(content, dict) else 0
+            if content_size < 2000:
                 summaries[filename] = content
                 yield _update(session, "summarization",
                              f"{filename}: extraction output is already compact, skipping summarization")
@@ -1118,10 +1066,14 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                 "MISSING_DOCUMENTS", "OVERALL_TITLE_OPINION",
                 "GROUP5_SKIPPED", "GROUP5_ERROR", "GROUP5_UNKNOWN",
             }
-            existing_codes = {c.get("rule_code", "") for c in all_checks}
+            existing_codes = {c.get("rule_code", "") for c in all_checks if isinstance(c, dict)}
             raw_meta_checks = meta_result.get("checks", [])
+            if not isinstance(raw_meta_checks, list):
+                raw_meta_checks = []
             meta_checks = []
             for mc in raw_meta_checks:
+                if not isinstance(mc, dict):
+                    continue
                 rc = mc.get("rule_code", "")
                 if rc in _META_RULE_CODES or rc not in existing_codes:
                     meta_checks.append(mc)
@@ -2200,6 +2152,10 @@ def _validate_group_result(result: dict, group: dict, memory_bank=None,
     cross-check, and explanation-status coherence.
     """
     checks = result.get("checks", [])
+    # Guard: LLM sometimes returns checks as strings or mixed types
+    if not isinstance(checks, list):
+        checks = []
+    checks = [c for c in checks if isinstance(c, dict)]
     valid_statuses = {"PASS", "FAIL", "WARNING", "NOT_APPLICABLE", "INFO"}
     valid_severities = {"CRITICAL", "HIGH", "MEDIUM", "INFO"}
 

@@ -2,9 +2,13 @@
 
 import os
 from pathlib import Path
+from dotenv import load_dotenv
 
 # Base paths
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Load .env from backend root (before any os.getenv calls)
+load_dotenv(BASE_DIR / ".env")
 TEMP_DIR = BASE_DIR / "temp"
 UPLOAD_DIR = TEMP_DIR / "uploads"
 REPORTS_DIR = TEMP_DIR / "reports"
@@ -20,20 +24,10 @@ for d in [TEMP_DIR, UPLOAD_DIR, REPORTS_DIR, SESSIONS_DIR]:
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gpt-oss:20b")
 
-# Vision model — for document extraction using page images (all types except EC)
-VISION_MODEL = os.getenv("VISION_MODEL", "qwen3-vl:8b")
-VISION_TIMEOUT = 300              # Per-request timeout for vision calls
-VISION_CONTEXT_WINDOW = 32768     # 32K tokens — sufficient for 8B vision extraction
-VISION_DOC_TYPES = {                # Doc types eligible for vision fallback (when text extraction confidence is low)
-    "EC", "PATTA", "CHITTA", "ADANGAL", "FMB", "SALE_DEED",
-    "LAYOUT_APPROVAL", "LEGAL_HEIR", "POA", "COURT_ORDER",
-    "WILL", "PARTITION_DEED", "GIFT_DEED", "RELEASE_DEED", "OTHER",
-}
-
-# Text-primary extraction with confidence-gated vision fallback
-VISION_FALLBACK_ENABLED = True        # Feature flag — disable to skip vision fallback entirely
-VISION_MAX_CONCURRENT = 1             # Max concurrent vision calls (1 = sequential, avoids GPU queue timeouts)
-TEXT_EXTRACTION_CONFIDENCE_THRESHOLD = 0.7   # Below this → trigger vision fallback
+# Vision model — REMOVED (qwen3-vl unreliable; all intelligence via gpt-oss now)
+# Sarvam provides OCR text, gpt-oss does all reasoning/extraction.
+# Kept for reference only:
+# VISION_MODEL = os.getenv("VISION_MODEL", "qwen3-vl:8b")
 
 # Processing
 MAX_CHUNK_PAGES = 10  # Max pages per LLM chunk for large documents
@@ -69,6 +63,7 @@ SARVAM_ENABLED = bool(SARVAM_API_KEY)
 SARVAM_LANGUAGE = "ta-IN"                    # Tamil (India)
 SARVAM_POLL_INTERVAL = 3                     # Seconds between job status polls
 SARVAM_TIMEOUT = 120                         # Max seconds to wait for job completion
+SARVAM_MAX_RETRIES = 2                       # Retry timed-out jobs up to N times
 
 # Debug trace mode — set HATAD_TRACE=1 to get detailed deterministic engine logs
 TRACE_ENABLED = os.getenv("HATAD_TRACE", "").strip().lower() in ("1", "true", "yes")

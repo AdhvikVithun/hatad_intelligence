@@ -5,8 +5,8 @@ import re
 import logging
 from pathlib import Path
 
-from app.config import PROMPTS_DIR, VISION_MODEL, MAX_CHUNK_PAGES, LLM_MAX_CONCURRENT_CHUNKS
-from app.pipeline.llm_client import call_llm, call_vision_llm, LLMProgressCallback
+from app.config import PROMPTS_DIR, MAX_CHUNK_PAGES, LLM_MAX_CONCURRENT_CHUNKS
+from app.pipeline.llm_client import call_llm, LLMProgressCallback
 from app.pipeline.extractors.base import BaseExtractor
 from app.pipeline.schemas import EXTRACT_PATTA_SCHEMA
 from app.pipeline.utils import normalize_survey_number, split_survey_numbers
@@ -458,87 +458,3 @@ def _merge_patta_results(chunk_results: list) -> dict:
     if notes:
         merged["extraction_notes"] = "; ".join(notes)
     return merged
-
-
-class VisionPattaExtractor(BaseExtractor):
-    """Extract ownership and land details from Patta documents using vision model.
-    
-    Renders PDF pages as images and sends them to a vision LLM (qwen3-vl)
-    that can SEE the table structure, avoiding serial number / extent column
-    conflation that plagues text-based extraction.
-    
-    Falls back to text-based PattaExtractor if:
-    - file_path is not provided
-    - Vision model is unavailable
-    - Image rendering fails
-    """
-
-    def __init__(self):
-        self.vision_prompt = (PROMPTS_DIR / "extract_patta_vision.txt").read_text(encoding="utf-8")
-        self._text_fallback = PattaExtractor()
-
-    async def extract(self, extracted_text: dict, on_progress: LLMProgressCallback | None = None, filename: str = "", file_path: Path | None = None, focus_fields: list[str] | None = None) -> dict:
-        name = filename or "Patta"
-
-        # Guard: need file_path for vision extraction
-        if not file_path or not file_path.exists():
-            logger.warning(f"[{name}] No file_path for vision extraction, falling back to text")
-            return await self._text_fallback.extract(extracted_text, on_progress, filename, file_path)
-
-        try:
-            # Check if vision model is available
-            from app.pipeline.llm_client import check_ollama_status
-            status = await check_ollama_status()
-            available_models = status.get("models", [])
-            if not any(VISION_MODEL in m for m in available_models):
-                logger.warning(f"[{name}] Vision model {VISION_MODEL} not available, falling back to text")
-                return await self._text_fallback.extract(extracted_text, on_progress, filename, file_path)
-
-            # Render PDF pages as images
-            from app.pipeline.ingestion import render_pages_as_images
-            images = render_pages_as_images(file_path)
-
-            if not images:
-                logger.warning(f"[{name}] No images rendered, falling back to text")
-                return await self._text_fallback.extract(extracted_text, on_progress, filename, file_path)
-
-            # Build prompt — add focus-field hint when acting as a fallback helper
-            focus_hint = ""
-            if focus_fields:
-                fields_str = ", ".join(focus_fields)
-                focus_hint = (
-                    f" The text-based extraction had LOW confidence for these fields: "
-                    f"{fields_str}. Pay EXTRA attention to extracting accurate values for them."
-                )
-
-            # Call vision model with page images
-            prompt = (
-                f"Extract all details from this Patta document ({len(images)} page(s)). "
-                "Look carefully at the table columns and distinguish the serial number (வ.எண்) "
-                f"from the extent/area (பரப்பு) column.{focus_hint}"
-            )
-            result = await call_vision_llm(
-                prompt=prompt,
-                images=images,
-                system_prompt=self.vision_prompt,
-                expect_json=EXTRACT_PATTA_SCHEMA,
-                task_label=f"{name} Vision Patta extraction ({len(images)} pages)",
-                on_progress=on_progress,
-            )
-
-            # Light post-processing (no serial number fix needed — vision handles it)
-            if isinstance(result, dict):
-                # Still do owner name checks
-                for owner in result.get("owner_names", []):
-                    if isinstance(owner, dict) and not owner.get("_name_order_verified"):
-                        owner["_name_order_verified"] = True
-                logger.info(f"[{name}] Vision extraction successful")
-            return result
-
-        except Exception as e:
-            logger.warning(f"[{name}] Vision extraction failed ({e}), falling back to text")
-            # Lazy OCR: enhance text quality before text fallback (Sarvam replaces Tesseract)
-            if file_path:
-                from app.pipeline.sarvam_ocr import run_sarvam_on_pages
-                extracted_text = await run_sarvam_on_pages(file_path, extracted_text)
-            return await self._text_fallback.extract(extracted_text, on_progress, filename, file_path)

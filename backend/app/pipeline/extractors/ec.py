@@ -6,7 +6,7 @@ import asyncio
 import logging
 from pathlib import Path
 from app.config import PROMPTS_DIR, MAX_CHUNK_PAGES, LLM_MAX_CONCURRENT_CHUNKS
-from app.pipeline.llm_client import call_llm, call_vision_llm, LLMProgressCallback
+from app.pipeline.llm_client import call_llm, LLMProgressCallback
 from app.pipeline.extractors.base import BaseExtractor
 from app.pipeline.schemas import EXTRACT_EC_SCHEMA
 
@@ -197,133 +197,30 @@ class ECExtractor(BaseExtractor):
         file_path: "Path | None",
         on_progress: LLMProgressCallback | None = None,
     ) -> dict:
-        """Targeted Qwen vision re-read for garbled Tamil party names.
+        """Targeted vision re-read for garbled Tamil party names.
 
-        Instead of sending the entire EC (65+ pages) to the vision model,
-        this identifies transactions with garbled Tamil names and sends
-        ONLY the relevant page(s) for re-extraction of party names.
-
-        Garbled detection uses the shared ``detect_garbled_tamil()`` utility.
+        DISABLED: qwen3-vl vision model removed from pipeline.
+        Tamil name quality now depends on Sarvam OCR text quality.
+        Garbled names are flagged for downstream matchers instead.
         """
-        from app.config import VISION_FALLBACK_ENABLED
-        if not VISION_FALLBACK_ENABLED or not file_path or not Path(file_path).exists():
-            return result
-
+        # Vision re-check disabled — no vision model available
         from app.pipeline.utils import detect_garbled_tamil
 
-        # Find transactions with garbled Tamil party names
+        # Find and flag transactions with garbled Tamil party names
         transactions = result.get("transactions", [])
-        garbled_indices: list[int] = []
-        for i, txn in enumerate(transactions):
+        garbled_count = 0
+        for txn in transactions:
             for field in ("seller_or_executant", "buyer_or_claimant"):
                 val = txn.get(field, "")
                 if val and isinstance(val, str) and len(val) >= 4:
                     is_garbled, _quality, _reason = detect_garbled_tamil(val)
                     if is_garbled:
-                        garbled_indices.append(i)
-                        break
+                        txn[f"_{field}_confidence"] = "low"
+                        garbled_count += 1
 
-        if not garbled_indices:
-            return result
-
-        logger.info(
-            f"ECExtractor: {len(garbled_indices)} transaction(s) have garbled Tamil names — "
-            f"triggering targeted Qwen vision re-read"
-        )
-
-        # Render only the pages we need
-        try:
-            from app.pipeline.ingestion import render_pages_as_images
-            all_images = render_pages_as_images(Path(file_path))
-            if not all_images:
-                logger.warning("ECExtractor: No images rendered, skipping vision re-check")
-                return result
-
-            # Determine which pages contain garbled transactions
-            # EC transactions are spread across pages — use dynamic rows_per_page
-            pages_processed = result.get("pages_processed", len(all_images))
-            txn_count = len(transactions)
-            # Dynamic: actual txn density instead of hardcoded //4
-            rows_per_page = max(2, txn_count // max(pages_processed, 1))
-
-            # Build a focused set of page images (max 3 pages to keep vision fast)
-            garbled_txns = [transactions[i] for i in garbled_indices]
-            page_indices = set()
-            for txn in garbled_txns:
-                row = txn.get("row_number", 1)
-                est_page = max(0, min(len(all_images) - 1, (row - 1) // rows_per_page))
-                page_indices.add(est_page)
-                # Also include adjacent page in case transaction spans boundary
-                if est_page + 1 < len(all_images):
-                    page_indices.add(est_page + 1)
-
-            # Cap at 4 pages to avoid overwhelming the vision model
-            selected_pages = sorted(page_indices)[:4]
-            images = [all_images[p] for p in selected_pages]
-
-            # Build a focused prompt listing which transactions need name correction
-            txn_descriptions = []
-            for txn in garbled_txns:
-                row = txn.get("row_number", "?")
-                doc_no = txn.get("document_number", "?")
-                seller = txn.get("seller_or_executant", "")
-                buyer = txn.get("buyer_or_claimant", "")
-                txn_descriptions.append(
-                    f"Row {row} (Doc #{doc_no}): seller='{seller}', buyer='{buyer}'"
-                )
-
-            prompt = (
-                "This is an Encumbrance Certificate (EC) from Tamil Nadu. "
-                "Some party names were extracted incorrectly from OCR text. "
-                "Please read the following transaction rows from the document image "
-                "and provide the CORRECT Tamil party names.\n\n"
-                "Transactions with garbled names:\n"
-                + "\n".join(txn_descriptions) + "\n\n"
-                "Return a JSON object with this format:\n"
-                '{"corrections": [{"row_number": N, "seller_or_executant": "correct name", '
-                '"buyer_or_claimant": "correct name"}, ...]}\n'
-                "Only include rows where you can read the name more accurately than what was extracted."
+        if garbled_count:
+            logger.info(
+                f"ECExtractor: {garbled_count} garbled Tamil name(s) flagged as low-confidence"
             )
-
-            vision_result = await call_vision_llm(
-                prompt=prompt,
-                images=images,
-                system_prompt="You are a Tamil document reader. Extract party names accurately from EC tables.",
-                expect_json=True,
-                task_label=f"EC name re-check ({len(images)} pages, {len(garbled_txns)} names)",
-                on_progress=on_progress,
-            )
-
-            # Apply corrections
-            corrections = vision_result.get("corrections", []) if isinstance(vision_result, dict) else []
-            applied = 0
-            for corr in corrections:
-                row = corr.get("row_number")
-                if row is None:
-                    continue
-                # Find matching transaction by row_number
-                for txn in transactions:
-                    if txn.get("row_number") == row:
-                        for field in ("seller_or_executant", "buyer_or_claimant"):
-                            new_val = corr.get(field)
-                            if new_val and isinstance(new_val, str) and len(new_val) >= 2:
-                                old_val = txn.get(field, "")
-                                txn[field] = new_val
-                                logger.info(
-                                    f"ECExtractor: Vision corrected row {row} "
-                                    f"{field}: '{old_val}' → '{new_val}'"
-                                )
-                                applied += 1
-                        break
-
-            if applied:
-                notes = result.get("extraction_notes", "")
-                vision_note = f"Vision re-checked {len(garbled_txns)} garbled name(s), applied {applied} correction(s)"
-                result["extraction_notes"] = f"{notes}; {vision_note}" if notes else vision_note
-                result["_extraction_method"] = "text+vision"
-                logger.info(f"ECExtractor: {vision_note}")
-
-        except Exception as e:
-            logger.warning(f"ECExtractor: Vision name re-check failed ({e}), keeping text extraction")
 
         return result

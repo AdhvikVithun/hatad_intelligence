@@ -9,8 +9,8 @@ import asyncio
 import json
 import logging
 from pathlib import Path
-from app.config import MAX_CHUNK_PAGES, LLM_MAX_CONCURRENT_CHUNKS, PROMPTS_DIR, VISION_MODEL
-from app.pipeline.llm_client import call_llm, call_vision_llm, LLMProgressCallback
+from app.config import MAX_CHUNK_PAGES, LLM_MAX_CONCURRENT_CHUNKS, PROMPTS_DIR
+from app.pipeline.llm_client import call_llm, LLMProgressCallback
 from app.pipeline.extractors.base import BaseExtractor
 from app.pipeline.schemas import EXTRACT_GENERIC_SCHEMA
 
@@ -134,72 +134,3 @@ Always include: "document_summary", "key_parties", "property_details", "key_date
             merged[field] = deduped
 
         return merged
-
-
-class VisionGenericExtractor(BaseExtractor):
-    """Vision-based catch-all extractor for all non-EC, non-Patta, non-SaleDeed document types.
-
-    Renders PDF pages as images and sends them to the vision model so it can
-    read tables, stamps, handwritten notes, and complex layouts directly.
-    Covers: ADANGAL, FMB, LAYOUT_APPROVAL, LEGAL_HEIR, POA, COURT_ORDER,
-            WILL, PARTITION_DEED, GIFT_DEED, RELEASE_DEED, OTHER.
-
-    Falls back to text-based GenericExtractor if vision is unavailable.
-    """
-
-    def __init__(self):
-        self.vision_prompt = (PROMPTS_DIR / "extract_generic_vision.txt").read_text(encoding="utf-8")
-        self._text_fallback = GenericExtractor()
-
-    async def extract(self, extracted_text: dict, on_progress: LLMProgressCallback | None = None, filename: str = "", file_path: "Path | None" = None, focus_fields: list[str] | None = None) -> dict:
-        name = filename or "document"
-
-        if not file_path or not Path(file_path).exists():
-            logger.warning(f"[{name}] No file_path for vision extraction, falling back to text")
-            return await self._text_fallback.extract(extracted_text, on_progress, filename, file_path)
-
-        try:
-            from app.pipeline.llm_client import check_ollama_status
-            status = await check_ollama_status()
-            if not any(VISION_MODEL in m for m in status.get("models", [])):
-                logger.warning(f"[{name}] Vision model {VISION_MODEL} not available, falling back to text")
-                return await self._text_fallback.extract(extracted_text, on_progress, filename, file_path)
-
-            from app.pipeline.ingestion import render_pages_as_images
-            images = render_pages_as_images(Path(file_path))
-            if not images:
-                logger.warning(f"[{name}] No images rendered, falling back to text")
-                return await self._text_fallback.extract(extracted_text, on_progress, filename, file_path)
-
-            # Build prompt — add focus-field hint when acting as a fallback helper
-            focus_hint = ""
-            if focus_fields:
-                fields_str = ", ".join(focus_fields)
-                focus_hint = (
-                    f" The text-based extraction had LOW confidence for these fields: "
-                    f"{fields_str}. Pay EXTRA attention to extracting accurate values for them."
-                )
-
-            prompt = (
-                f"Extract all relevant details from this Tamil Nadu land document ({len(images)} page(s)). "
-                "Identify the document type, all parties, property details, survey numbers, "
-                f"extents, dates, amounts, legal conditions, and any other relevant information.{focus_hint}"
-            )
-            result = await call_vision_llm(
-                prompt=prompt,
-                images=images,
-                system_prompt=self.vision_prompt,
-                expect_json=EXTRACT_GENERIC_SCHEMA,
-                task_label=f"{name} Vision extraction ({len(images)} pages)",
-                on_progress=on_progress,
-            )
-            logger.info(f"[{name}] Vision extraction successful")
-            return result
-
-        except Exception as e:
-            logger.warning(f"[{name}] Vision extraction failed ({e}), falling back to text")
-            # Lazy OCR: enhance text quality before text fallback (Sarvam replaces Tesseract)
-            if file_path:
-                from app.pipeline.sarvam_ocr import run_sarvam_on_pages
-                extracted_text = await run_sarvam_on_pages(Path(file_path), extracted_text)
-            return await self._text_fallback.extract(extracted_text, on_progress, filename, file_path)

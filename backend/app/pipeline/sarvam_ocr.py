@@ -25,6 +25,7 @@ from app.config import (
     SARVAM_API_KEY,
     SARVAM_ENABLED,
     SARVAM_LANGUAGE,
+    SARVAM_MAX_RETRIES,
     SARVAM_POLL_INTERVAL,
     SARVAM_TIMEOUT,
 )
@@ -132,7 +133,7 @@ def _assess_page_quality(text: str) -> dict:
 
 
 # ── Core Sarvam extraction ────────────────────────────────────────
-async def sarvam_extract_text(file_path: Path, *, on_progress=None) -> dict | None:
+async def sarvam_extract_text(file_path: str | Path, *, on_progress=None) -> dict | None:
     """Upload a PDF to Sarvam AI and return extracted text.
 
     Runs the synchronous ``sarvamai`` SDK in a thread pool to avoid
@@ -146,6 +147,7 @@ async def sarvam_extract_text(file_path: Path, *, on_progress=None) -> dict | No
         dict matching ``extract_text_from_pdf()`` format, or ``None``
         if Sarvam is disabled / unavailable / fails.
     """
+    file_path = Path(file_path)
     if not SARVAM_ENABLED:
         return None
     if not _check_sarvam_sdk():
@@ -157,12 +159,12 @@ async def sarvam_extract_text(file_path: Path, *, on_progress=None) -> dict | No
         )
         return result
     except Exception as e:
-        logger.error(f"Sarvam AI extraction failed for {file_path.name}: {e}")
+        logger.error(f"HATAD Vision extraction failed for {file_path.name}: {e}")
         if on_progress:
             try:
                 await on_progress(
                     "extraction",
-                    f"Sarvam AI failed for {file_path.name}: {e} (falling back to local OCR)",
+                    f"HATAD Vision failed for {file_path.name}: {e} (falling back to text extraction)",
                     {"type": "sarvam_error", "error": str(e)},
                 )
             except Exception:
@@ -170,11 +172,29 @@ async def sarvam_extract_text(file_path: Path, *, on_progress=None) -> dict | No
         return None
 
 
-def _sarvam_extract_sync(file_path: Path) -> dict | None:
-    """Synchronous Sarvam extraction — called via ``asyncio.to_thread``."""
+def _sarvam_extract_sync(file_path: str | Path) -> dict | None:
+    """Synchronous Sarvam extraction — called via ``asyncio.to_thread``.
+
+    Retries up to SARVAM_MAX_RETRIES times on timeout.
+    """
+    for attempt in range(1, SARVAM_MAX_RETRIES + 2):  # attempt 1 = first try
+        result = _sarvam_extract_single_attempt(file_path, attempt)
+        if result is not None:
+            return result
+        if attempt <= SARVAM_MAX_RETRIES:
+            logger.warning(
+                f"Sarvam AI: retrying {Path(file_path).name} "
+                f"(attempt {attempt + 1}/{SARVAM_MAX_RETRIES + 1})"
+            )
+    return None
+
+
+def _sarvam_extract_single_attempt(file_path: str | Path, attempt: int = 1) -> dict | None:
+    """Single attempt at Sarvam extraction."""
     from sarvamai import SarvamAI
 
-    logger.info(f"Sarvam AI: starting extraction for {file_path.name}")
+    file_path = Path(file_path)
+    logger.info(f"Sarvam AI: starting extraction for {file_path.name} (attempt {attempt})")
 
     client = SarvamAI(api_subscription_key=SARVAM_API_KEY)
 
@@ -193,26 +213,42 @@ def _sarvam_extract_sync(file_path: Path) -> dict | None:
     job.start()
     logger.info(f"Sarvam AI: processing started for {file_path.name}")
 
-    # 4. Wait for completion (with timeout)
-    import time
-    elapsed = 0
-    status = None
-    while elapsed < SARVAM_TIMEOUT:
-        status = job.get_status()
-        state = getattr(status, "job_state", None) or getattr(status, "state", None) or str(status)
-        logger.debug(f"Sarvam AI: job {job.job_id} state={state} ({elapsed}s)")
-
-        if state in ("completed", "COMPLETED", "success", "SUCCESS"):
-            break
-        if state in ("failed", "FAILED", "error", "ERROR"):
-            logger.error(f"Sarvam AI job failed: {state}")
-            return None
-
-        time.sleep(SARVAM_POLL_INTERVAL)
-        elapsed += SARVAM_POLL_INTERVAL
-    else:
-        logger.error(f"Sarvam AI: timeout after {SARVAM_TIMEOUT}s for {file_path.name}")
+    # 4. Wait for completion using SDK's built-in method
+    #    Terminal states: Completed, PartiallyCompleted, Failed
+    try:
+        status = job.wait_until_complete(
+            poll_interval=SARVAM_POLL_INTERVAL,
+            timeout=SARVAM_TIMEOUT,
+        )
+    except Exception as e:
+        logger.error(f"Sarvam AI: wait failed for {file_path.name}: {e}")
         return None
+
+    state = getattr(status, "job_state", None) or getattr(status, "state", None) or str(status)
+    state_lower = str(state).lower()
+    logger.info(f"Sarvam AI: job {job.job_id} finished with state={state}")
+
+    if state_lower == "failed":
+        err = getattr(status, "error_message", None) or "unknown error"
+        logger.error(f"Sarvam AI job failed for {file_path.name}: {err}")
+        return None
+
+    if state_lower not in ("completed", "partiallycompleted"):
+        # Unexpected state after wait — guard against SDK changes
+        logger.error(f"Sarvam AI: unexpected state '{state}' after wait for {file_path.name}")
+        return None
+
+    if state_lower == "partiallycompleted":
+        # Some pages succeeded, some failed — still download what we can
+        try:
+            metrics = job.get_page_metrics()
+            logger.warning(
+                f"Sarvam AI: partial completion for {file_path.name} — "
+                f"{metrics.get('pages_succeeded', '?')}/{metrics.get('total_pages', '?')} pages OK, "
+                f"{metrics.get('pages_failed', '?')} failed"
+            )
+        except Exception:
+            logger.warning(f"Sarvam AI: partial completion for {file_path.name}")
 
     # 5. Download output ZIP
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -334,30 +370,30 @@ async def run_sarvam_on_pages(
     if not low_indices:
         return text_data  # Nothing to improve
 
-    # If Sarvam already ran (Stage 1b) and these pages are still LOW,
-    # re-running won't help — Sarvam already gave its best.
+    # If HATAD Vision already ran (Stage 1b) and these pages are still LOW,
+    # re-running won't help — it already gave its best.
     sarvam_count = sum(1 for p in pages if p.get("extraction_method") == "sarvam")
     if sarvam_count > 0:
         logger.info(
-            f"Sarvam already processed {file_path.name} — "
-            f"{len(low_indices)} LOW pages remain (Sarvam can't improve further)"
+            f"HATAD Vision already processed {file_path.name} — "
+            f"{len(low_indices)} LOW pages remain (cannot improve further)"
         )
         return text_data
 
-    # Fresh Sarvam run for this document
+    # Fresh HATAD Vision run for this document
     logger.info(
-        f"Running Sarvam OCR on {file_path.name} "
+        f"Running HATAD Vision OCR on {file_path.name} "
         f"({len(low_indices)}/{len(pages)} LOW-quality pages)"
     )
     sarvam_result = await sarvam_extract_text(file_path, on_progress=on_progress)
     if sarvam_result is None:
         logger.warning(
-            f"Sarvam OCR unavailable for {file_path.name} — "
+            f"HATAD Vision unavailable for {file_path.name} — "
             f"LOW-quality pages will use pdfplumber text as-is"
         )
         return text_data
 
-    # Merge: Sarvam replaces LOW-quality pages where it's better
+    # Merge: HATAD Vision replaces LOW-quality pages where it's better
     merged = merge_sarvam_with_pdfplumber(sarvam_result, text_data)
 
     # Copy merged pages back into text_data (in-place mutation)
@@ -370,7 +406,7 @@ async def run_sarvam_on_pages(
     sarvam_used = merged.get("sarvam_pages", 0)
     if sarvam_used:
         logger.info(
-            f"Sarvam enhanced {sarvam_used}/{len(pages)} pages for {file_path.name}"
+            f"HATAD Vision enhanced {sarvam_used}/{len(pages)} pages for {file_path.name}"
         )
     return text_data
 

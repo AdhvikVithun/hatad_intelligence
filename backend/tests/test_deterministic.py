@@ -1611,3 +1611,85 @@ class TestComputeScoreDeductions:
             {"status": "PASS", "severity": "CRITICAL"},
         ]
         assert _compute_score_deductions(checks) == 0
+
+
+# ═══════════════════════════════════════════════════
+# SURVEY NUMBER HARDENING TESTS
+# ═══════════════════════════════════════════════════
+
+class TestTSNoPrefixInEC:
+    """EC property_description with T.S.No., O.S.No., N.S.No. prefixes
+    should be detected by the improved regex."""
+
+    def test_ts_no_extracted(self):
+        """T.S.No. in EC property description → survey extracted."""
+        ec = _ec("01-01-2010", "31-12-2025")
+        ec["ec.pdf"]["data"]["property_description"] = "T.S.No. 45/2 in Ward 5"
+        data = {**_sale_deed(survey="45/2"), **ec}
+        checks = check_survey_number_consistency(data)
+        # Should NOT be a mismatch since they match
+        assert "DET_SURVEY_MISMATCH" not in _codes(checks)
+
+    def test_os_no_extracted(self):
+        """O.S.No. in EC property description → survey extracted."""
+        ec = _ec("01-01-2010", "31-12-2025")
+        ec["ec.pdf"]["data"]["property_description"] = "O.S.No. 100 in Village X"
+        data = {**_sale_deed(survey="100"), **ec}
+        checks = check_survey_number_consistency(data)
+        assert "DET_SURVEY_MISMATCH" not in _codes(checks)
+
+    def test_ns_no_extracted(self):
+        """N.S.No. in EC property description → survey extracted."""
+        ec = _ec("01-01-2010", "31-12-2025")
+        ec["ec.pdf"]["data"]["property_description"] = "N.S.No. 200/3A"
+        data = {**_sale_deed(survey="200/3A"), **ec}
+        checks = check_survey_number_consistency(data)
+        assert "DET_SURVEY_MISMATCH" not in _codes(checks)
+
+    def test_s_no_extracted(self):
+        """S.No. in EC property description → survey extracted."""
+        ec = _ec("01-01-2010", "31-12-2025")
+        ec["ec.pdf"]["data"]["property_description"] = "S.No. 77/1"
+        data = {**_sale_deed(survey="77/1"), **ec}
+        checks = check_survey_number_consistency(data)
+        assert "DET_SURVEY_MISMATCH" not in _codes(checks)
+
+
+class TestIntraECSurveyConsistency:
+    """Intra-EC consistency: property description vs transaction surveys."""
+
+    def test_consistent_ec_no_warning(self):
+        """Same survey in header and transactions → no intra-EC warning."""
+        ec = _ec("01-01-2010", "31-12-2025", transactions=[
+            {"row_number": 1, "date": "01-01-2015", "transaction_type": "Sale",
+             "survey_number": "311/1"},
+        ])
+        ec["ec.pdf"]["data"]["property_description"] = "S.F.No. 311/1 in Chromepet"
+        data = {**_sale_deed(survey="311/1"), **ec}
+        checks = check_survey_number_consistency(data)
+        assert "DET_EC_INTERNAL_SURVEY_INCONSISTENCY" not in _codes(checks)
+
+    def test_inconsistent_ec_warning(self):
+        """Header says 311, transaction says 500 → DET_EC_INTERNAL_SURVEY_INCONSISTENCY."""
+        ec = _ec("01-01-2010", "31-12-2025", transactions=[
+            {"row_number": 1, "date": "01-01-2015", "transaction_type": "Sale",
+             "survey_number": "500/2"},
+        ])
+        ec["ec.pdf"]["data"]["property_description"] = "S.F.No. 311 in Chromepet"
+        data = {**_sale_deed(survey="311"), **ec}
+        checks = check_survey_number_consistency(data)
+        assert "DET_EC_INTERNAL_SURVEY_INCONSISTENCY" in _codes(checks)
+        c = _find(checks, "DET_EC_INTERNAL_SURVEY_INCONSISTENCY")
+        assert c["severity"] == "HIGH"
+        assert c["status"] == "WARNING"
+
+    def test_subdivision_within_ec_no_warning(self):
+        """Header says 311, transaction says 311/1 → subdivision, not inconsistency."""
+        ec = _ec("01-01-2010", "31-12-2025", transactions=[
+            {"row_number": 1, "date": "01-01-2015", "transaction_type": "Sale",
+             "survey_number": "311/1"},
+        ])
+        ec["ec.pdf"]["data"]["property_description"] = "S.F.No. 311 in Chromepet"
+        data = {**_sale_deed(survey="311"), **ec}
+        checks = check_survey_number_consistency(data)
+        assert "DET_EC_INTERNAL_SURVEY_INCONSISTENCY" not in _codes(checks)

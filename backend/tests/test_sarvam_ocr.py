@@ -332,8 +332,8 @@ class TestSarvamExtractSync:
         mock_job.job_id = "test-job-123"
 
         mock_status = MagicMock()
-        mock_status.job_state = "completed"
-        mock_job.get_status.return_value = mock_status
+        mock_status.job_state = "Completed"
+        mock_job.wait_until_complete.return_value = mock_status
 
         def mock_download(path):
             import shutil
@@ -384,7 +384,7 @@ class TestSarvamExtractSync:
 
         mock_status = MagicMock()
         mock_status.job_state = "processing"  # never completes
-        mock_job.get_status.return_value = mock_status
+        mock_job.wait_until_complete.side_effect = TimeoutError("Sarvam timeout")
 
         mock_client = MagicMock()
         mock_client.document_intelligence.create_job.return_value = mock_job
@@ -413,8 +413,9 @@ class TestSarvamExtractSync:
         mock_job.job_id = "test-job-fail"
 
         mock_status = MagicMock()
-        mock_status.job_state = "failed"
-        mock_job.get_status.return_value = mock_status
+        mock_status.job_state = "Failed"
+        mock_status.error_message = "Processing error"
+        mock_job.wait_until_complete.return_value = mock_status
 
         mock_client = MagicMock()
         mock_client.document_intelligence.create_job.return_value = mock_job

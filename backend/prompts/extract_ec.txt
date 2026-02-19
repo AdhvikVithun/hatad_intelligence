@@ -36,6 +36,7 @@ IMPORTANT GUIDELINES:
 5. Survey numbers may have subdivisions like "123/1A", "45/2B"
 6. Watch for: mortgage entries without corresponding releases, same property sold multiple times, rapid succession of transactions
 7. If the text contains headers/column names, use them to guide extraction
+7a. SURVEY NUMBER ACCURACY: For each transaction row, extract the survey number EXACTLY as written in that row. Do NOT copy the survey number from the EC property_description header into every transaction row. If a transaction row does not mention a survey number, leave the survey_number field empty. This is critical for legal accuracy.
 
 CRITICAL — CONSIDERATION AMOUNT EXTRACTION:
 8. ALWAYS extract the consideration/sale amount (மறுபடி/எதிர்பரிசீலனை தொகை) for EVERY sale deed entry.

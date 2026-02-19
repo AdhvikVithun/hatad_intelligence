@@ -18,8 +18,13 @@ from app.config import (
     LLM_CONTEXT_WINDOW, LLM_MAX_INPUT_CHARS, LLM_WARN_INPUT_CHARS,
     LLM_USE_STRUCTURED_OUTPUTS, LLM_USE_THINKING, LLM_USE_TOOLS,
     LLM_TOOL_CALL_MAX_ROUNDS,
-    VISION_MODEL, VISION_TIMEOUT, VISION_CONTEXT_WINDOW,
 )
+
+# Vision model removed — these are kept as fallback defaults for call_vision_llm
+# which is retained but no longer called from the pipeline.
+VISION_MODEL = "qwen3-vl:8b"     # Not used — kept for API compat
+VISION_TIMEOUT = 300              # Not used
+VISION_CONTEXT_WINDOW = 32768    # Not used
 
 logger = logging.getLogger(__name__)
 
@@ -237,6 +242,8 @@ async def call_llm(
                     "temperature": temperature,
                     "num_predict": predict_budget,
                     "num_ctx": LLM_CONTEXT_WINDOW,
+                    "repeat_penalty": 1.3,     # Prevent repetition loops (e.g. "பட்டா" ×200)
+                    "repeat_last_n": 256,       # Look-back window for repeat penalty
                 },
                 "format": format_param,
                 "think": use_think,  # Always explicit — prevents model-level default thinking
@@ -681,6 +688,14 @@ async def call_llm(
             if thinking_text:
                 logger.warning(f"[{label}] Thinking was present ({len(thinking_text):,} chars) but JSON extraction failed")
 
+            # Detect LLM repetition loop (e.g. "பட்டா" ×200) and escalate
+            combined_output = (content or "") + (thinking_text or "")
+            if _is_repetitive_output(combined_output):
+                logger.warning(f"[{label}] Repetition loop detected — escalating repeat_penalty to 1.5, temp to 0.4")
+                body["options"]["repeat_penalty"] = 1.5
+                body["options"]["temperature"] = 0.4
+                body["options"]["repeat_last_n"] = 512
+
             # Fallback: if structured output (schema) failed, drop to basic "json" mode
             if schema_enforced:
                 logger.warning(f"[{label}] Schema-enforced output failed, falling back to basic JSON mode")
@@ -739,6 +754,23 @@ async def call_llm(
         }
 
     raise RuntimeError(f"LLM call failed after {LLM_MAX_RETRIES} attempts: {last_error}")
+
+
+def _is_repetitive_output(text: str, min_repeats: int = 10) -> bool:
+    """Detect degenerate repetition-loop output from the LLM.
+
+    Returns True if a short token (≤30 chars) appears consecutively
+    *min_repeats* or more times, indicating the decoder got stuck.
+    """
+    if not text or len(text) < 50:
+        return False
+    # Match any token (1-30 chars) repeated 10+ times with optional whitespace/comma/quotes
+    import re
+    pattern = re.compile(
+        r'(["\']?[^"\',;\n]{1,30}["\']?(?:\s*[,;]?\s*))\1{' + str(min_repeats - 1) + r',}',
+        re.UNICODE,
+    )
+    return bool(pattern.search(text))
 
 
 def _parse_json_response(text: str) -> dict:
@@ -924,20 +956,19 @@ async def call_vision_llm(
         messages.append({"role": "system", "content": system_prompt})
     
     # Ollama vision API: images are base64 strings in the user message
-    user_msg = {"role": "user", "content": prompt, "images": images}
+    # Prepend /no_think to disable qwen3's internal thinking mode —
+    # without this, the model dumps output into the thinking field
+    # and returns empty content.
+    user_msg = {"role": "user", "content": f"/no_think\n{prompt}", "images": images}
     messages.append(user_msg)
 
     # Determine format parameter
-    # NOTE: Always use basic JSON mode for vision calls — qwen3-vl:8b
-    # handles simple schemas (classification) but returns empty responses
-    # for complex nested schemas (extraction). The prompt guides the
-    # output structure; _parse_json_response() handles JSON extraction.
-    if expect_json:
-        format_param = "json"
-        schema_enforced = False
-    else:
-        format_param = ""
-        schema_enforced = False
+    # NOTE: Do NOT use format:"json" with qwen3-vl — it causes the model
+    # to dump all output into the thinking field and return empty content
+    # (eval_count=16384 but content=""). Instead, let the model output
+    # freely and extract JSON from the response via _parse_json_response().
+    format_param = ""
+    schema_enforced = False
 
     prompt_chars = len(prompt) + (len(system_prompt) if system_prompt else 0)
     await cb("llm_start", f"{label}", {
@@ -982,11 +1013,9 @@ async def call_vision_llm(
                 "stream": False,
                 "options": {
                     "temperature": temperature,
-                    "num_predict": 16384,  # Extraction output is compact JSON
+                    "num_predict": 4096,  # Extraction JSON is compact; 4K is plenty
                     "num_ctx": VISION_CONTEXT_WINDOW,
                 },
-                "format": format_param,
-                "think": False,  # 8B vision model: thinking + format:json conflicts
             }
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(VISION_TIMEOUT, connect=30.0)) as client:
@@ -1029,37 +1058,30 @@ async def call_vision_llm(
                     "tok_per_sec": round(tok_per_sec, 1),
                 })
 
-                # Parse JSON if expected
-                if expect_json and content.strip():
+                # Parse JSON if expected — try content first, then thinking
+                combined_text = content.strip()
+                if not combined_text and thinking_text:
+                    logger.info(f"[{label}] Content empty, using thinking text ({len(thinking_text)} chars)")
+                    combined_text = thinking_text.strip()
+
+                if expect_json and combined_text:
                     try:
-                        parsed = json.loads(content)
+                        parsed = json.loads(combined_text)
                         if thinking_text and isinstance(parsed, dict):
                             parsed["_thinking"] = thinking_text
                         return parsed
-                    except json.JSONDecodeError as e:
+                    except json.JSONDecodeError:
                         try:
-                            parsed = _parse_json_response(content)
+                            parsed = _parse_json_response(combined_text)
                             if thinking_text and isinstance(parsed, dict):
                                 parsed["_thinking"] = thinking_text
                             return parsed
                         except (json.JSONDecodeError, Exception):
-                            last_error = f"JSON parse error: {e}"
+                            last_error = f"No valid JSON in response ({len(combined_text)} chars)"
                             logger.warning(f"[{label}] {last_error}, attempt {attempt + 1}")
                             continue
-                elif expect_json and thinking_text:
-                    # Content empty but thinking has text — try extracting JSON from thinking
-                    logger.info(f"[{label}] Content empty, trying JSON from thinking ({len(thinking_text)} chars)")
-                    try:
-                        parsed = _parse_json_response(thinking_text)
-                        if isinstance(parsed, dict):
-                            parsed["_thinking"] = thinking_text
-                        return parsed
-                    except (json.JSONDecodeError, Exception):
-                        last_error = "Empty content, thinking had no valid JSON"
-                        logger.warning(f"[{label}] {last_error}, attempt {attempt + 1}")
-                        continue
                 elif not expect_json:
-                    return content
+                    return content if content.strip() else thinking_text
                 else:
                     last_error = "Empty response from vision model"
                     logger.warning(f"[{label}] {last_error}, attempt {attempt + 1}")
@@ -1101,8 +1123,8 @@ async def check_ollama_status() -> dict:
                 "models": model_names,
                 "configured_model": "HATAD AI \u2726 Reasoning",
                 "model_available": any(OLLAMA_MODEL in name for name in model_names),
-                "vision_model": "HATAD AI \u2726 Vision",
-                "vision_model_available": any(VISION_MODEL in name for name in model_names),
+                "vision_model": "HATAD AI \u2726 Vision (disabled)",
+                "vision_model_available": False,
             }
             _ollama_status_cache = result
             _ollama_status_ts = now
