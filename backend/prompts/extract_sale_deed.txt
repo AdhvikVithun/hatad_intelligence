@@ -1,0 +1,114 @@
+You are an expert Tamil Nadu land document analyst. Extract all details from this Sale Deed document.
+
+A Sale Deed is a registered document that transfers property ownership from seller to buyer. It is registered at a Sub-Registrar Office (SRO) in Tamil Nadu.
+
+Extract the following information:
+- document_number: Registration number
+- registration_date: Date of registration (YYYY-MM-DD)
+- sro: Sub-Registrar Office where registered
+- book_volume: Book number and volume if mentioned
+
+SELLER DETAILS:
+- seller_names: Name(s) of seller(s) with father's/husband's name
+- seller_age: Age(s) of seller(s)
+- seller_address: Address of seller(s)
+- seller_aadhaar: Aadhaar number if mentioned (may be partially masked)
+- seller_pan: PAN number if mentioned
+
+BUYER DETAILS:
+- buyer_names: Name(s) of buyer(s) with father's/husband's name  
+- buyer_age: Age(s) of buyer(s)
+- buyer_address: Address of buyer(s)
+
+PROPERTY DETAILS:
+- property_description: Full property description from schedule
+- survey_number: Survey number(s) with subdivisions
+- door_number: Door/plot number if applicable
+- village: Village name
+- taluk: Taluk name
+- district: District name
+- total_extent: Total extent with unit
+- boundaries: North, South, East, West boundaries
+- property_type: Residential/Agricultural/Commercial/Industrial
+
+FINANCIAL DETAILS:
+- consideration_amount: Sale price in ₹
+- guideline_value: Government guideline value if mentioned
+- stamp_duty_paid: Stamp duty amount
+- registration_fee: Registration fee paid
+- tds_deducted: TDS amount if applicable
+
+PREVIOUS OWNERSHIP:
+- previous_document_number: Previous sale deed or source document number
+- previous_document_date: Date of previous document
+- previous_owner: Name of previous owner before seller
+- how_seller_acquired: How seller acquired the property (sale/gift/inheritance/partition)
+
+WITNESSES:
+- witnesses: List of witness names
+
+SPECIAL CLAUSES:
+- special_conditions: Any special conditions, restrictions, or covenants
+- power_of_attorney: If sold via POA, details of POA
+- joint_development: If part of JDA, details
+
+TAMIL-SPECIFIC EXTRACTION RULES:
+- Tamil numerals: ௧=1 ௨=2 ௩=3 ௪=4 ௫=5 ௬=6 ௭=7 ௮=8 ௯=9 ௰=10 ௱=100 ௲=1000. Convert to Arabic numerals in output.
+- Tamil extent units: எக்கர் (acre), சென்ட் (cent), ஹெக்டேர் (hectare), சதுர அடி (sq.ft), குழி (kuzhi ≈ 144 sq.ft). Transliterate to English.
+- Multi-party names: If multiple sellers or buyers are listed (joined by "மற்றும்" / "and" / ","), list EACH person as a separate entry in the seller/buyer array.
+- Survey type prefixes: Preserve S.F.No./T.S.No./R.S.No./O.S.No./N.S.No. prefix exactly. Do NOT strip it.
+- Common Tamil terms: விற்பனையாளர் (seller), வாங்குபவர் (buyer), ஆவண எண் (document number), தேதி (date), சொத்து விவரம் (property description), எல்லைகள் (boundaries).
+- Father/husband name markers: S/o (மகன்), D/o (மகள்), W/o (மனைவி) — preserve these as-is.
+
+Return ONLY valid JSON:
+{
+    "document_number": "1234/2024",
+    "registration_date": "2024-01-15",
+    "sro": "Tambaram",
+    "seller": [
+        {
+            "name": "Seller Name",
+            "father_name": "Father Name",
+            "age": 45,
+            "address": "Address"
+        }
+    ],
+    "buyer": [
+        {
+            "name": "Buyer Name",
+            "father_name": "Father Name",
+            "age": 35,
+            "address": "Address"
+        }
+    ],
+    "property": {
+        "survey_number": "123/4A",
+        "village": "Village",
+        "taluk": "Taluk",
+        "district": "District",
+        "extent": "2400 sq.ft",
+        "boundaries": {
+            "north": "...",
+            "south": "...",
+            "east": "...",
+            "west": "..."
+        },
+        "property_type": "Residential"
+    },
+    "financials": {
+        "consideration_amount": 5000000,
+        "guideline_value": 4800000,
+        "stamp_duty": 350000,
+        "registration_fee": 50000
+    },
+    "previous_ownership": {
+        "document_number": "5678/2020",
+        "document_date": "2020-06-15",
+        "previous_owner": "Previous Owner Name",
+        "acquisition_mode": "Sale"
+    },
+    "witnesses": ["Witness 1", "Witness 2"],
+    "special_conditions": [],
+    "power_of_attorney": null,
+    "remarks": ""
+}

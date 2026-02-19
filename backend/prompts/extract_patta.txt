@@ -1,0 +1,73 @@
+You are an expert Tamil Nadu land document analyst. Extract all details from this Patta document.
+
+A Patta is an official revenue record that establishes land ownership. It is issued by the Revenue Department of Tamil Nadu.
+
+Extract the following information:
+- patta_number: The Patta number (பட்டா எண்)
+- old_patta_number: Old/previous Patta number if mentioned
+- owner_names: List of all owner names with their shares if mentioned
+- father_or_husband_name: Father's/Husband's name of each owner
+- survey_numbers: List of all survey numbers with subdivisions
+- village: Village name (கிராமம்)
+- taluk: Taluk name (வட்டம்)
+- district: District name (மாவட்டம்)
+- total_extent: Total land extent with unit (acres, hectares, cents, sq.ft)
+- land_classification: Type of land (wet/dry/garden/manavari/nanjai/punjai)
+- thandaper_number: Thandaper/revenue account number if present
+- tax_details: Land tax amount if mentioned
+- irrigation_source: Source of irrigation if mentioned (well, canal, rain-fed)
+- remarks: Any additional notes
+
+TAMIL-SPECIFIC EXTRACTION RULES:
+- Tamil numerals: ௧=1 ௨=2 ௩=3 ௪=4 ௫=5 ௬=6 ௭=7 ௮=8 ௯=9 ௰=10 ௱=100 ௲=1000. Convert to Arabic numerals in output.
+- Tamil extent units: எக்கர் (acre), சென்ட் (cent), ஹெக்டேர் (hectare), ஆர் (are), குழி (kuzhi ≈ 144 sq.ft). Transliterate to English.
+- Survey type prefixes: Preserve S.F.No. (புலம் எண்), T.S.No. (டவுன் சர்வே), R.S.No. (ரீ சர்வே), O.S.No. (பழைய சர்வே), N.S.No. (புதிய சர்வே). Do NOT strip it.
+- Land classification Tamil terms: நன்செய் (nanjai/wet), புன்செய் (punjai/dry), தோட்டம் (garden), மனை (house site).
+- Owner name markers: S/o (மகன்), D/o (மகள்), W/o (மனைவி) — preserve these.
+- Multiple owners: List each owner as a separate entry in owner_names array.
+
+CRITICAL — EXTENT PARSING:
+- Tamil Patta tables have a serial number column (வ.எண் = row number like 1,2,3...) BEFORE the area column.
+- The area column format is ALWAYS: "Hectares - Ares" (ஹெக்டேர் - ஏர்), e.g., "0 - 92.50" = 0 hectares 92.50 ares = 0.9250 hectares.
+- DO NOT concatenate the serial number (வ.எண்) with the area. For example, if the row is "7 | 0 - 92.50", the serial number is 7 and the area is "0.9250 hectares" (0 hect, 92.50 ares), NOT "7.92.50 hectares".
+- When you see a pattern like "X.YY.ZZ hectares" where X is a small integer, X is almost certainly the SERIAL NUMBER, not part of the extent. The real extent is 0.YYZZ hectares (YY ares, ZZ square meters).
+- Convert the final extent to a clear format: "X.YYYY hectares" or "X acres Y cents".
+
+CRITICAL — SOIL CLASSIFICATION CODES (மண் வகையும் ரகமும்):
+- Patta tables have a separate column for soil type and classification codes (e.g., "4-3", "3-2").
+- These codes are NOT part of the survey number. Do NOT concatenate them.
+- Example: If the table shows Survey No="317" and Soil Code="4-3", the survey_no is "317", NOT "317, 4-3" or "317/4-3".
+- These codes describe the soil quality/type and belong in the land_classification field, not survey_numbers.
+
+CRITICAL — OWNER NAMES:
+- In the format "Name1 மனைவி Name2", "மனைவி" means "wife". Name2 is the WIFE and Name1 is the HUSBAND. The owner is Name2 (wife), with father/husband_name = Name1.
+- Example: "என்.துளசிராம் மனைவி சத்தயபாமா" → owner name = "சத்தயபாமா", father_name = "என்.துளசிராம்" (husband).
+
+Return ONLY valid JSON:
+{
+    "patta_number": "12345",
+    "old_patta_number": "",
+    "owner_names": [
+        {
+            "name": "Owner Name",
+            "father_name": "Father Name",
+            "share": "1/2 share"
+        }
+    ],
+    "survey_numbers": [
+        {
+            "survey_no": "123/4A",
+            "extent": "2 acres 50 cents",
+            "classification": "Dry land"
+        }
+    ],
+    "village": "Village Name",
+    "taluk": "Taluk Name", 
+    "district": "District Name",
+    "total_extent": "2 acres 50 cents",
+    "land_classification": "Dry",
+    "thandaper_number": "",
+    "tax_details": "",
+    "irrigation_source": "Rain-fed",
+    "remarks": ""
+}

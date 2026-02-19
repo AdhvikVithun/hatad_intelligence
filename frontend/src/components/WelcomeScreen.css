@@ -1,0 +1,93 @@
+.welcome {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: var(--space-8);
+  text-align: center;
+  background: var(--bg-primary);
+}
+
+.welcome__logo {
+  font-family: var(--font-sans);
+  font-size: 56px;
+  font-weight: 700;
+  letter-spacing: 12px;
+  color: var(--primary);
+  margin-bottom: var(--space-4);
+}
+
+.welcome__tagline {
+  font-size: var(--text-md);
+  color: var(--text-tertiary);
+  max-width: 400px;
+  line-height: 1.6;
+  margin-bottom: var(--space-10);
+}
+
+.welcome__steps {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.welcome__step {
+  padding: var(--space-6);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-lg);
+  min-width: 190px;
+  transition: all var(--transition-base);
+  box-shadow: var(--shadow-card);
+}
+.welcome__step:hover {
+  border-color: var(--primary-border);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+
+.welcome__step-icon {
+  width: 44px;
+  height: 44px;
+  margin: 0 auto var(--space-3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-lg);
+  background: var(--primary-bg);
+  color: var(--primary);
+}
+
+.welcome__step-icon .material-icons {
+  font-size: 22px;
+}
+
+.welcome__step-num {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xl);
+  font-weight: 700;
+  color: var(--primary);
+  margin-bottom: var(--space-2);
+}
+
+.welcome__step-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: var(--space-1);
+}
+
+.welcome__step-desc {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  line-height: 1.4;
+}
+
+.welcome__step-arrow {
+  color: var(--text-dim);
+}
+
+.welcome__step-arrow .material-icons {
+  font-size: 20px;
+}

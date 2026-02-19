@@ -1,0 +1,94 @@
+.error-boundary {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-16) var(--space-8);
+  text-align: center;
+  animation: fadeIn 0.4s ease-out;
+}
+
+.error-boundary__icon {
+  font-size: 48px;
+  color: var(--red);
+  margin-bottom: var(--space-4);
+  opacity: 0.8;
+}
+
+.error-boundary__title {
+  font-size: var(--text-lg);
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: var(--space-2);
+}
+
+.error-boundary__desc {
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+  max-width: 360px;
+  margin-bottom: var(--space-4);
+}
+
+.error-boundary__detail {
+  font-size: 11px;
+  color: var(--red);
+  background: rgba(255, 0, 0, 0.06);
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius);
+  max-width: 500px;
+  overflow-x: auto;
+  margin-bottom: var(--space-4);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.error-boundary__btn {
+  padding: var(--space-2) var(--space-6);
+  background: var(--primary);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  transition: background 0.15s;
+}
+
+.error-boundary__btn:hover {
+  background: var(--primary-hover, var(--primary));
+  opacity: 0.9;
+}
+
+/* Failed-state banner shown on the pipeline tab when analysis failed */
+.pipeline-failed-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-6);
+  margin: var(--space-4) 0;
+  background: rgba(255, 0, 0, 0.06);
+  border: 1px solid rgba(255, 0, 0, 0.15);
+  border-radius: var(--radius);
+  animation: fadeIn 0.3s ease-out;
+}
+
+.pipeline-failed-banner__icon {
+  font-size: 24px;
+  color: var(--red);
+  flex-shrink: 0;
+}
+
+.pipeline-failed-banner__text {
+  flex: 1;
+}
+
+.pipeline-failed-banner__title {
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 2px;
+}
+
+.pipeline-failed-banner__desc {
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+}

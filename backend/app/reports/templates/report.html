@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>HATAD Land Intelligence Report - {{ session_id }}</title>
+    <style>
+        @page {
+            size: A4;
+            margin: 1.5cm;
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Arial, sans-serif;
+            color: #1a1a2e;
+            line-height: 1.6;
+            font-size: 11px;
+        }
+        
+        .cover {
+            text-align: center;
+            padding: 60px 40px;
+            background: linear-gradient(135deg, #0a0a1a 0%, #1a1a3e 100%);
+            color: white;
+            page-break-after: always;
+            min-height: 90vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+        
+        .cover h1 {
+            font-size: 32px;
+            letter-spacing: 4px;
+            margin-bottom: 10px;
+            color: #00ff88;
+        }
+        
+        .cover .subtitle {
+            font-size: 16px;
+            color: #aab;
+            margin-bottom: 60px;
+        }
+        
+        .cover .report-title {
+            font-size: 24px;
+            margin-bottom: 20px;
+        }
+        
+        .cover .meta {
+            font-size: 12px;
+            color: #889;
+            margin-top: 40px;
+        }
+        
+        .risk-badge-cover {
+            display: inline-block;
+            padding: 20px 50px;
+            border-radius: 8px;
+            font-size: 48px;
+            font-weight: bold;
+            margin: 30px 0;
+            border: 3px solid {{ risk_color }};
+            color: {{ risk_color }};
+        }
+        
+        .risk-label-cover {
+            font-size: 18px;
+            color: {{ risk_color }};
+            text-transform: uppercase;
+            letter-spacing: 3px;
+        }
+        
+        .section {
+            margin-bottom: 20px;
+        }
+        
+        .section-header {
+            background: #1a1a2e;
+            color: white;
+            padding: 8px 15px;
+            font-size: 14px;
+            font-weight: bold;
+            letter-spacing: 1px;
+            margin-bottom: 10px;
+        }
+        
+        .subsection {
+            margin: 10px 0;
+            padding: 10px 15px;
+            background: #f8f9fa;
+            border-left: 3px solid #1a1a2e;
+        }
+        
+        .summary-box {
+            padding: 15px;
+            background: #f0f7ff;
+            border: 1px solid #cce0ff;
+            border-radius: 4px;
+            margin-bottom: 15px;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 10px 0;
+            font-size: 10px;
+        }
+        
+        th {
+            background: #1a1a2e;
+            color: white;
+            padding: 6px 8px;
+            text-align: left;
+            font-weight: 600;
+        }
+        
+        td {
+            padding: 5px 8px;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        
+        tr:nth-child(even) {
+            background: #f8f9fa;
+        }
+        
+        .status-pass {
+            color: #00aa55;
+            font-weight: bold;
+        }
+        
+        .status-fail {
+            color: #ff0033;
+            font-weight: bold;
+        }
+        
+        .status-warning {
+            color: #ff8800;
+            font-weight: bold;
+        }
+        
+        .status-na {
+            color: #888;
+        }
+        
+        .severity-critical {
+            background: #fff0f0;
+            border-left: 4px solid #ff0033;
+        }
+        
+        .severity-high {
+            background: #fff8f0;
+            border-left: 4px solid #ff8800;
+        }
+        
+        .severity-medium {
+            background: #f0f8ff;
+            border-left: 4px solid #0066cc;
+        }
+        
+        .check-card {
+            padding: 10px 15px;
+            margin: 8px 0;
+            border-radius: 4px;
+        }
+        
+        .check-header {
+            font-weight: bold;
+            font-size: 11px;
+            margin-bottom: 4px;
+        }
+        
+        .check-explanation {
+            font-size: 10px;
+            color: #444;
+            margin-bottom: 4px;
+        }
+        
+        .check-recommendation {
+            font-size: 10px;
+            color: #0066cc;
+            font-style: italic;
+        }
+        
+        .red-flag {
+            padding: 8px 12px;
+            background: #fff0f0;
+            border-left: 4px solid #ff0033;
+            margin: 5px 0;
+            font-size: 11px;
+        }
+        
+        .recommendation {
+            padding: 8px 12px;
+            background: #f0fff0;
+            border-left: 4px solid #00aa55;
+            margin: 5px 0;
+            font-size: 11px;
+        }
+        
+        .stats-grid {
+            display: flex;
+            gap: 15px;
+            margin: 10px 0;
+        }
+        
+        .stat-box {
+            flex: 1;
+            text-align: center;
+            padding: 10px;
+            border-radius: 4px;
+            background: #f8f9fa;
+        }
+        
+        .stat-number {
+            font-size: 24px;
+            font-weight: bold;
+        }
+        
+        .stat-label {
+            font-size: 9px;
+            text-transform: uppercase;
+            color: #666;
+        }
+        
+        .narrative {
+            white-space: pre-wrap;
+            font-size: 10px;
+            line-height: 1.8;
+            padding: 15px;
+            background: #fafafa;
+            border: 1px solid #e0e0e0;
+        }
+        
+        .footer {
+            margin-top: 30px;
+            padding: 15px;
+            background: #f0f0f0;
+            font-size: 9px;
+            color: #666;
+            text-align: center;
+        }
+        
+        .page-break {
+            page-break-before: always;
+        }
+    </style>
+</head>
+<body>
+
+<!-- COVER PAGE -->
+<div class="cover">
+    <h1>HATAD</h1>
+    <div class="subtitle">LAND INTELLIGENCE PLATFORM</div>
+    <div class="report-title">Property Due Diligence Report</div>
+    <div class="risk-badge-cover">{{ risk_score }}</div>
+    <div class="risk-label-cover">{{ risk_label }}</div>
+    <div class="meta">
+        Session: {{ session_id }}<br>
+        Generated: {{ generated_at }}<br>
+        Documents Analyzed: {{ documents|length }}
+    </div>
+</div>
+
+<!-- EXECUTIVE SUMMARY -->
+<div class="section">
+    <div class="section-header">EXECUTIVE SUMMARY</div>
+    <div class="summary-box">
+        {{ executive_summary }}
+    </div>
+    
+    <div class="stats-grid">
+        <div class="stat-box">
+            <div class="stat-number" style="color: {{ risk_color }}">{{ risk_score }}</div>
+            <div class="stat-label">Risk Score</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-number" style="color: #00aa55">{{ total_pass }}</div>
+            <div class="stat-label">Checks Passed</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-number" style="color: #ff0033">{{ total_fail }}</div>
+            <div class="stat-label">Checks Failed</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-number" style="color: #ff8800">{{ total_warn }}</div>
+            <div class="stat-label">Warnings</div>
+        </div>
+    </div>
+</div>
+
+<!-- DOCUMENTS ANALYZED -->
+<div class="section">
+    <div class="section-header">DOCUMENTS ANALYZED</div>
+    <table>
+        <tr>
+            <th>File</th>
+            <th>Type</th>
+            <th>Pages</th>
+            <th>Confidence</th>
+        </tr>
+        {% for doc in documents %}
+        <tr>
+            <td>{{ doc.filename }}</td>
+            <td>{{ doc.document_type | default('PENDING') }}</td>
+            <td>{{ doc.pages }}</td>
+            <td>{{ "%.0f%%"|format((doc.classification.confidence | default(0)) * 100) }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+</div>
+
+<!-- RED FLAGS -->
+{% if red_flags %}
+<div class="section">
+    <div class="section-header">🚨 RED FLAGS</div>
+    {% for flag in red_flags %}
+    <div class="red-flag">{{ flag }}</div>
+    {% endfor %}
+</div>
+{% endif %}
+
+<!-- CRITICAL CHECKS -->
+<div class="section page-break">
+    <div class="section-header">CRITICAL CHECKS ({{ critical_checks|length }})</div>
+    {% for check in critical_checks %}
+    <div class="check-card severity-critical">
+        <div class="check-header">
+            <span class="status-{{ check.status|lower }}">{{ check.status }}</span>
+            — {{ check.rule_name }}
+        </div>
+        <div class="check-explanation">{{ check.explanation }}</div>
+        <div class="check-recommendation">→ {{ check.recommendation }}</div>
+    </div>
+    {% endfor %}
+</div>
+
+<!-- HIGH PRIORITY CHECKS -->
+<div class="section">
+    <div class="section-header">HIGH PRIORITY CHECKS ({{ high_checks|length }})</div>
+    {% for check in high_checks %}
+    <div class="check-card severity-high">
+        <div class="check-header">
+            <span class="status-{{ check.status|lower }}">{{ check.status }}</span>
+            — {{ check.rule_name }}
+        </div>
+        <div class="check-explanation">{{ check.explanation }}</div>
+        <div class="check-recommendation">→ {{ check.recommendation }}</div>
+    </div>
+    {% endfor %}
+</div>
+
+<!-- MEDIUM CHECKS -->
+<div class="section">
+    <div class="section-header">MEDIUM PRIORITY CHECKS ({{ medium_checks|length }})</div>
+    {% for check in medium_checks %}
+    <div class="check-card severity-medium">
+        <div class="check-header">
+            <span class="status-{{ check.status|lower }}">{{ check.status }}</span>
+            — {{ check.rule_name }}
+        </div>
+        <div class="check-explanation">{{ check.explanation }}</div>
+        <div class="check-recommendation">→ {{ check.recommendation }}</div>
+    </div>
+    {% endfor %}
+</div>
+
+<!-- CHAIN OF TITLE -->
+{% if chain_of_title %}
+<div class="section page-break">
+    <div class="section-header">CHAIN OF TITLE</div>
+    <table>
+        <tr>
+            <th>#</th>
+            <th>Date</th>
+            <th>From</th>
+            <th>To</th>
+            <th>Type</th>
+            <th>Doc No</th>
+            <th>Valid</th>
+        </tr>
+        {% for link in chain_of_title %}
+        <tr>
+            <td>{{ link.sequence }}</td>
+            <td>{{ link.date }}</td>
+            <td>{{ link.from }}</td>
+            <td>{{ link.to }}</td>
+            <td>{{ link.transaction_type }}</td>
+            <td>{{ link.document_number }}</td>
+            <td class="status-{{ 'pass' if link.valid else 'fail' }}">
+                {{ '✓' if link.valid else '✗' }}
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+</div>
+{% endif %}
+
+<!-- RECOMMENDATIONS -->
+{% if recommendations %}
+<div class="section">
+    <div class="section-header">RECOMMENDATIONS</div>
+    {% for rec in recommendations %}
+    <div class="recommendation">{{ loop.index }}. {{ rec }}</div>
+    {% endfor %}
+</div>
+{% endif %}
+
+<!-- MISSING DOCUMENTS -->
+{% if missing_documents %}
+<div class="section">
+    <div class="section-header">DOCUMENTS TO OBTAIN</div>
+    {% for doc in missing_documents %}
+    <div class="recommendation">☐ {{ doc }}</div>
+    {% endfor %}
+</div>
+{% endif %}
+
+<!-- DETAILED NARRATIVE REPORT -->
+{% if narrative_report %}
+<div class="section page-break">
+    <div class="section-header">DETAILED NARRATIVE REPORT</div>
+    <div class="narrative">{{ narrative_report }}</div>
+</div>
+{% endif %}
+
+<!-- FOOTER -->
+<div class="footer">
+    <strong>HATAD LAND INTELLIGENCE PLATFORM</strong><br>
+    This report is generated based on automated analysis of uploaded documents. It does not constitute legal advice.
+    Physical verification, government record verification, and consultation with a qualified lawyer are strongly recommended.
+    <br><br>
+    Session: {{ session_id }} | Generated: {{ generated_at }}
+</div>
+
+</body>
+</html>

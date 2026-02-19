@@ -1,0 +1,188 @@
+.topbar {
+  display: flex;
+  align-items: center;
+  height: 52px;
+  padding: 0 var(--space-5);
+  background: var(--bg-primary);
+  border-bottom: 1px solid var(--border-primary);
+  gap: var(--space-4);
+  flex-shrink: 0;
+  z-index: 100;
+}
+
+/* ── Brand ── */
+.topbar__brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 180px;
+}
+
+.topbar__logo {
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--gradient-brand);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 15px;
+  color: #fff;
+}
+
+.topbar__brand-text {
+  display: flex;
+  flex-direction: column;
+}
+
+.topbar__name {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: var(--text-sm);
+  letter-spacing: 2px;
+  color: var(--text-primary);
+}
+
+.topbar__sub {
+  font-size: 9px;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  font-family: var(--font-mono);
+}
+
+/* ── Center status ── */
+.topbar__center {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: var(--space-6);
+}
+
+.topbar__status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-1) var(--space-4);
+  border-radius: var(--radius-full);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: 1px;
+}
+
+.topbar__status--active {
+  background: var(--primary-bg);
+  border: 1px solid var(--primary-border);
+}
+
+.topbar__status--done {
+  background: var(--green-bg);
+  border: 1px solid var(--green-border);
+}
+
+.topbar__pulse {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--primary);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+.topbar__status-label {
+  color: var(--text-secondary);
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.topbar__status-timer {
+  color: var(--primary);
+  font-weight: 700;
+}
+
+.topbar__status-stage {
+  color: var(--text-tertiary);
+  font-size: 10px;
+}
+
+.topbar__status-score {
+  font-weight: 700;
+}
+
+.topbar__status-band {
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+/* ── Metrics (center chips) ── */
+.topbar__metrics {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.topbar__metric {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+
+.topbar__metric-icon {
+  font-size: 16px;
+  color: var(--text-dim);
+}
+
+.topbar__metric-value {
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.topbar__metric-label {
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* ── Right ── */
+.topbar__right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  min-width: 180px;
+  justify-content: flex-end;
+}
+
+.topbar__indicator {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  letter-spacing: 0.5px;
+}
+
+.topbar__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.topbar__dot.online {
+  background: var(--green);
+}
+
+.topbar__dot.offline {
+  background: var(--red);
+}
+
+.topbar__clock {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  letter-spacing: 1px;
+}

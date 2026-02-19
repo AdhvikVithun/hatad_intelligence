@@ -1,0 +1,293 @@
+/* ═══════════════════════════════════════════════════
+   HATAD — Identity Resolution Panel
+   ═══════════════════════════════════════════════════ */
+
+.identity-panel {
+  padding: var(--space-4);
+  animation: fadeIn 0.3s ease-out;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/* ── Stats strip ── */
+.identity-stats {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.identity-stat {
+  flex: 1;
+  padding: var(--space-3);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-md);
+  text-align: center;
+  box-shadow: var(--shadow-xs);
+}
+
+.identity-stat__value {
+  font-family: var(--font-mono);
+  font-size: var(--text-xl);
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.identity-stat__label {
+  font-size: 9px;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-top: 2px;
+  font-family: var(--font-mono);
+}
+
+/* ── Cluster card ── */
+.identity-cluster {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+
+.identity-cluster__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s;
+}
+
+.identity-cluster__header:hover {
+  background: var(--bg-surface);
+}
+
+.identity-cluster__icon {
+  font-size: 28px;
+  color: var(--text-dim);
+}
+
+.identity-cluster__info {
+  flex: 1;
+  min-width: 0;
+}
+
+.identity-cluster__name {
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.identity-cluster__meta {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: 2px;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+}
+
+.identity-cluster__meta-item {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.identity-cluster__meta-item .material-icons {
+  font-size: 12px;
+}
+
+/* ── Confidence badge ── */
+.identity-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  font-size: 11px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+}
+
+.identity-badge--high {
+  background: var(--green-bg);
+  color: var(--green);
+  border: 1px solid var(--green-border);
+}
+
+.identity-badge--moderate {
+  background: var(--blue-bg);
+  color: var(--blue);
+  border: 1px solid var(--blue-border);
+}
+
+.identity-badge--low {
+  background: var(--amber-bg);
+  color: var(--amber);
+  border: 1px solid var(--amber-border);
+}
+
+.identity-badge--very-low {
+  background: var(--red-bg);
+  color: var(--red);
+  border: 1px solid var(--red-border);
+}
+
+.identity-cluster__expand {
+  font-size: 20px;
+  color: var(--text-dim);
+  transition: transform 0.2s;
+}
+
+.identity-cluster__expand--open {
+  transform: rotate(180deg);
+}
+
+/* ── Roles ── */
+.identity-roles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 0 var(--space-4) var(--space-2);
+}
+
+.identity-role-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 8px;
+  border-radius: var(--radius-full);
+  font-size: 10px;
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  background: var(--primary-bg);
+  color: var(--primary);
+  border: 1px solid var(--primary-border);
+}
+
+/* ── Expanded body ── */
+.identity-cluster__body {
+  border-top: 1px solid var(--border-primary);
+  padding: var(--space-3) var(--space-4);
+}
+
+.identity-section {
+  margin-bottom: var(--space-3);
+}
+
+.identity-section:last-child { margin-bottom: 0; }
+
+.identity-section__title {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: var(--text-dim);
+  margin-bottom: var(--space-2);
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+}
+
+/* ── Evidence lines ── */
+.identity-evidence {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.identity-evidence__item {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.identity-evidence__icon {
+  font-size: 14px;
+  color: var(--text-dim);
+  margin-top: 1px;
+  flex-shrink: 0;
+}
+
+/* ── Mentions table ── */
+.identity-mentions-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-xs);
+}
+
+.identity-mentions-table th {
+  padding: var(--space-1) var(--space-2);
+  text-align: left;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-tertiary);
+  border-bottom: 1px solid var(--border-primary);
+  font-family: var(--font-mono);
+}
+
+.identity-mentions-table td {
+  padding: var(--space-1) var(--space-2);
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-subtle);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+}
+
+.identity-mentions-table tr:last-child td {
+  border-bottom: none;
+}
+
+.identity-mention-quality {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-family: var(--font-mono);
+}
+
+.identity-mention-quality--good { color: var(--green); }
+.identity-mention-quality--fair { color: var(--amber); }
+.identity-mention-quality--poor { color: var(--red); }
+
+/* ── Sources ── */
+.identity-sources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.identity-source-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 8px;
+  border-radius: var(--radius-md);
+  font-size: 10px;
+  font-family: var(--font-mono);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-primary);
+}
+
+.identity-source-chip .material-icons {
+  font-size: 12px;
+  color: var(--text-dim);
+}

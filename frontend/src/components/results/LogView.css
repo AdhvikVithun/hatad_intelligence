@@ -1,0 +1,82 @@
+.log-view {
+  padding: var(--space-2);
+  overflow-y: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  animation: fadeIn 0.3s ease-out;
+}
+
+.log-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 200px;
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+}
+
+.log-entry {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: 3px var(--space-3);
+  border-radius: var(--radius-sm);
+  line-height: 1.6;
+  transition: background var(--speed-fast);
+}
+.log-entry:hover { background: var(--bg-hover); }
+
+.log-entry--error { background: rgba(239,68,68,0.04); }
+.log-entry--complete { background: rgba(16,185,129,0.04); }
+
+.log-entry__time {
+  color: var(--text-dim);
+  font-size: 10px;
+  flex-shrink: 0;
+  min-width: 64px;
+}
+
+.log-entry__stage {
+  color: var(--primary);
+  font-weight: 600;
+  font-size: 10px;
+  min-width: 80px;
+  flex-shrink: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.log-entry__stage--llm { color: #a855f7; }
+
+.log-entry__msg {
+  color: var(--text-secondary);
+  word-break: break-word;
+  flex: 1;
+}
+
+.log-entry--error .log-entry__msg { color: var(--red); }
+.log-entry--complete .log-entry__msg { color: var(--green); }
+
+.log-entry__badges {
+  display: flex;
+  gap: 3px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.lb {
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  font-size: 9px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.lb--model { background: rgba(59,130,246,0.1); color: #3b82f6; }
+.lb--reasoning { background: rgba(59,130,246,0.12); color: #3b82f6; }
+.lb--vision { background: rgba(139,92,246,0.12); color: #8b5cf6; }
+.lb--pages { background: rgba(139,92,246,0.08); color: #a78bfa; }
+.lb--tokens { background: rgba(19,91,236,0.08); color: var(--primary); }
+.lb--speed { background: rgba(245,158,11,0.1); color: #f59e0b; }
+.lb--time { background: rgba(148,163,184,0.08); color: #94a3b8; }
+.lb--retry { background: rgba(239,68,68,0.12); color: #ef4444; }
+.lb--error { background: rgba(239,68,68,0.12); color: #ef4444; max-width: 200px; overflow: hidden; text-overflow: ellipsis; }

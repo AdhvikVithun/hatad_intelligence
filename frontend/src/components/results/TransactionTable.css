@@ -1,0 +1,67 @@
+.txn-view {
+  padding: var(--space-4);
+  animation: fadeIn 0.3s ease-out;
+  overflow: auto;
+}
+
+.txn-view__empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 200px;
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+}
+
+.txn-table-wrap { overflow-x: auto; }
+
+.txn-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+
+.txn-table th {
+  padding: var(--space-2) var(--space-3);
+  text-align: left;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-tertiary);
+  border-bottom: 1px solid var(--border-primary);
+  background: var(--bg-surface);
+  position: sticky;
+  top: 0;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+
+.txn-table td {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-primary);
+  font-size: 12px;
+}
+
+.txn-table tbody tr:hover { background: var(--bg-hover); }
+
+.txn-cell--date { color: var(--primary); white-space: nowrap; font-family: var(--font-mono); font-size: 11px; }
+.txn-cell--doc { font-family: var(--font-mono); font-size: 11px; color: var(--text-tertiary); }
+.txn-cell--amount { text-align: right; font-family: var(--font-mono); color: var(--green); }
+
+.txn-type {
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 10px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+}
+
+.txn-type--sale { background: rgba(16,185,129,0.12); color: #10b981; }
+.txn-type--mortgage { background: rgba(239,68,68,0.12); color: #ef4444; }
+.txn-type--gift { background: rgba(168,85,247,0.12); color: #a855f7; }
+.txn-type--partition { background: rgba(245,158,11,0.12); color: #f59e0b; }
+.txn-type--release { background: rgba(59,130,246,0.12); color: #3b82f6; }
+.txn-type--other { background: rgba(148,163,184,0.08); color: #94a3b8; }

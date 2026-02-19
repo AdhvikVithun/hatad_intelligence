@@ -1,0 +1,29 @@
+.report-view {
+  padding: var(--space-4);
+  animation: fadeIn 0.3s ease-out;
+  overflow-y: auto;
+}
+
+.report-content {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: var(--space-6);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-lg);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  line-height: 1.8;
+  white-space: pre-wrap;
+  font-family: var(--font-sans);
+  box-shadow: var(--shadow-card);
+}
+
+.report-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 200px;
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+}

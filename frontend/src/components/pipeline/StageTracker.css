@@ -1,0 +1,125 @@
+/* ═══ Stage Tracker ═══ */
+.stage-tracker {
+  padding: var(--space-5) var(--space-5) var(--space-4);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-lg);
+  margin-bottom: var(--space-4);
+}
+
+.stage-tracker__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-4);
+}
+
+.stage-tracker__label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+}
+
+.stage-tracker__progress {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  letter-spacing: 0.5px;
+}
+
+/* ── Rail (nodes + line) ── */
+.stage-tracker__rail {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 0 var(--space-2);
+}
+
+/* ── Background line behind nodes ── */
+.stage-rail__line {
+  position: absolute;
+  top: 15px;                    /* center of the 30px circle */
+  left: var(--space-4);
+  right: var(--space-4);
+  height: 2px;
+  background: var(--border-primary);
+  z-index: 0;
+  border-radius: 1px;
+}
+
+.stage-rail__fill {
+  height: 100%;
+  background: var(--green);
+  border-radius: 1px;
+  transition: width 0.6s ease;
+}
+
+/* ── Individual node ── */
+.stage-node {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  z-index: 1;
+  min-width: 56px;
+}
+
+.stage-node__circle {
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  border: 2px solid var(--border-primary);
+  color: var(--text-tertiary);
+  background: var(--bg-primary);
+  transition: all 0.4s ease;
+  position: relative;
+  z-index: 2;
+}
+
+/* ── Done state ── */
+.stage-node--done .stage-node__circle {
+  border-color: var(--green);
+  color: #fff;
+  background: var(--green);
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.25);
+}
+
+/* ── Active / processing state ── */
+.stage-node--active .stage-node__circle {
+  border-color: var(--primary);
+  color: var(--primary);
+  background: var(--primary-bg);
+  box-shadow: 0 0 10px rgba(19, 91, 236, 0.2);
+  animation: stagePulse 2s ease-in-out infinite;
+}
+
+/* ── Labels ── */
+.stage-node__label {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.8px;
+  color: var(--text-tertiary);
+  margin-top: 6px;
+  text-align: center;
+  white-space: nowrap;
+  text-transform: uppercase;
+  font-family: var(--font-mono);
+}
+
+.stage-node--done  .stage-node__label { color: var(--green); }
+.stage-node--active .stage-node__label { color: var(--primary); }
+
+/* ── Keyframe ── */
+@keyframes stagePulse {
+  0%, 100% { box-shadow: 0 0 6px rgba(19, 91, 236, 0.15); }
+  50%      { box-shadow: 0 0 16px rgba(19, 91, 236, 0.35); }
+}
