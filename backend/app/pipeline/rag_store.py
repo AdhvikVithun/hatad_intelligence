@@ -14,6 +14,7 @@ Architecture:
 
 import logging
 import asyncio
+import re
 from dataclasses import dataclass
 from typing import Callable, Awaitable
 
@@ -22,7 +23,8 @@ from chromadb.config import Settings
 
 from app.config import (
     CHROMA_DIR, RAG_CHUNK_SIZE, RAG_CHUNK_OVERLAP, RAG_TOP_K,
-    RAG_MIN_CHUNK_CHARS, RAG_MAX_DISTANCE,
+    RAG_MIN_CHUNK_CHARS, RAG_MAX_DISTANCE, RAG_MMR_LAMBDA,
+    RAG_KEYWORD_BOOST,
 )
 
 logger = logging.getLogger(__name__)
@@ -36,18 +38,39 @@ class RetrievedChunk:
     page_number: int
     chunk_index: int
     score: float  # distance — lower is more similar
+    transaction_id: str = ""  # stable EC transaction ID if available
 
     def to_citation(self) -> str:
         return f"[{self.filename} p.{self.page_number}]"
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "text": self.text,
             "filename": self.filename,
             "page_number": self.page_number,
             "chunk_index": self.chunk_index,
             "score": round(self.score, 4),
         }
+        if self.transaction_id:
+            d["transaction_id"] = self.transaction_id
+        return d
+
+
+def _build_where_filter(
+    filter_filename: str | None = None,
+    filter_transaction_type: str | None = None,
+) -> dict | None:
+    """Build a ChromaDB ``where`` filter from optional criteria."""
+    conditions: list[dict] = []
+    if filter_filename:
+        conditions.append({"filename": filter_filename})
+    if filter_transaction_type:
+        conditions.append({"transaction_type": filter_transaction_type.strip().lower()})
+    if not conditions:
+        return None
+    if len(conditions) == 1:
+        return conditions[0]
+    return {"$and": conditions}
 
 
 class RAGStore:
@@ -127,11 +150,16 @@ class RAGStore:
             for ci, chunk in enumerate(chunks):
                 chunk_id = f"{filename}__p{page_num}__c{ci}"
                 all_chunks.append(chunk)
-                all_metas.append({
+                meta = {
                     "filename": filename,
                     "page_number": page_num,
                     "chunk_index": ci,
-                })
+                }
+                # Include transaction_id in metadata if provided
+                tid = page.get("transaction_id", "")
+                if tid:
+                    meta["transaction_id"] = tid
+                all_metas.append(meta)
                 all_ids.append(chunk_id)
 
         if not all_chunks:
@@ -155,6 +183,111 @@ class RAGStore:
         logger.info(f"RAGStore: Indexed {len(all_chunks)} chunks from {filename} "
                      f"(total: {self._indexed_count})")
         return len(all_chunks)
+
+    async def index_transactions(
+        self,
+        filename: str,
+        transactions: list[dict],
+        embed_fn: Callable[[list[str]], Awaitable[list[list[float]]]],
+        ec_header: dict | None = None,
+    ) -> int:
+        """Index EC transactions as individual semantic chunks.
+
+        Each transaction becomes one embedding with rich metadata —
+        enabling retrieval by transaction_type, survey_number, party name,
+        or document_number.  This replaces the flat character-based chunking
+        for post-extraction EC data with semantically meaningful units.
+
+        Args:
+            filename: Source EC filename
+            transactions: List of extracted transaction dicts
+            embed_fn: Async function list[str] → list[list[float]]
+            ec_header: Optional EC-level context (ec_number, village, period)
+
+        Returns:
+            Number of transaction chunks indexed
+        """
+        if not transactions:
+            return 0
+
+        header_prefix = ""
+        if ec_header:
+            parts = []
+            for k in ("ec_number", "village", "taluk", "period_from", "period_to"):
+                v = ec_header.get(k)
+                if v:
+                    parts.append(f"{k.replace('_', ' ').title()}: {v}")
+            if parts:
+                header_prefix = f"[EC] {filename} | {' | '.join(parts)}\n"
+
+        all_texts: list[str] = []
+        all_metas: list[dict] = []
+        all_ids: list[str] = []
+
+        for i, txn in enumerate(transactions):
+            # Build a natural-language text representation of this transaction
+            lines = [header_prefix] if header_prefix else [f"[EC] {filename}"]
+
+            txn_type = txn.get("transaction_type", "Unknown")
+            doc_num = txn.get("document_number", "")
+            date = txn.get("date", "")
+            seller = txn.get("seller_or_executant", "")
+            buyer = txn.get("buyer_or_claimant", "")
+            survey = txn.get("survey_number", "")
+            amount = txn.get("consideration_amount", "")
+            remarks = txn.get("remarks", "")
+            tid = txn.get("transaction_id", f"txn_{i}")
+
+            lines.append(f"Transaction #{txn.get('row_number', i+1)}: {txn_type}")
+            if doc_num:
+                lines.append(f"Document No: {doc_num}")
+            if date:
+                lines.append(f"Date: {date}")
+            if seller:
+                lines.append(f"Seller/Executant: {seller}")
+            if buyer:
+                lines.append(f"Buyer/Claimant: {buyer}")
+            if survey:
+                lines.append(f"Survey No: {survey}")
+            if amount:
+                lines.append(f"Amount: {amount}")
+            if remarks:
+                lines.append(f"Remarks: {remarks}")
+
+            text = "\n".join(lines)
+
+            # Metadata for filtered retrieval
+            meta = {
+                "filename": filename,
+                "page_number": txn.get("row_number", i + 1),
+                "chunk_index": i,
+                "transaction_id": tid,
+                "transaction_type": txn_type.lower().strip(),
+                "has_survey": bool(survey),
+            }
+
+            chunk_id = f"{filename}__txn_{tid}"
+            all_texts.append(text)
+            all_metas.append(meta)
+            all_ids.append(chunk_id)
+
+        if not all_texts:
+            return 0
+
+        logger.info(f"RAGStore: Embedding {len(all_texts)} EC transactions from {filename}")
+        embeddings = await embed_fn(all_texts)
+
+        self._collection.upsert(
+            ids=all_ids,
+            embeddings=embeddings,
+            documents=all_texts,
+            metadatas=all_metas,
+        )
+
+        self._indexed_count += len(all_texts)
+        logger.info(f"RAGStore: Indexed {len(all_texts)} transactions from {filename} "
+                     f"(total: {self._indexed_count})")
+        return len(all_texts)
 
     # ── Retrieval ──
 
@@ -218,23 +351,86 @@ class RAGStore:
                     page_number=meta["page_number"],
                     chunk_index=meta["chunk_index"],
                     score=dist,
+                    transaction_id=meta.get("transaction_id", ""),
                 ))
 
         return chunks
+
+    # ── Hybrid keyword helpers ──
+
+    # Stopwords excluded from keyword scoring (common English + domain fillers)
+    _STOP_WORDS: set[str] = frozenset({
+        "the", "and", "for", "are", "but", "not", "you", "all", "any", "can",
+        "had", "her", "was", "one", "our", "out", "has", "what", "who", "how",
+        "this", "that", "with", "from", "they", "been", "have", "which",
+        "their", "will", "each", "make", "does", "when", "where", "some",
+        "then", "than", "them", "into", "also", "after", "other", "should",
+        "could", "would", "about", "these", "there", "document", "documents",
+        "find", "search", "check", "verify", "whether", "name", "value",
+    })
+
+    @staticmethod
+    def _extract_keywords(query: str) -> list[str]:
+        """Extract significant keywords from a query string.
+
+        Returns lowercased tokens (3+ chars, not stopwords).
+        Numeric / identifier-like tokens (contain digits) are always included
+        regardless of stopword list.
+        """
+        tokens = re.findall(r"[\w/.-]{3,}", query)
+        result: list[str] = []
+        seen: set[str] = set()
+        for tok in tokens:
+            low = tok.lower()
+            if low in seen:
+                continue
+            seen.add(low)
+            has_digit = any(c.isdigit() for c in low)
+            if has_digit or low not in RAGStore._STOP_WORDS:
+                result.append(low)
+        return result
+
+    @staticmethod
+    def _keyword_score(keywords: list[str], doc_text: str) -> float:
+        """Fraction of *keywords* that appear in *doc_text* (case-insensitive).
+
+        Numeric / identifier keywords receive 2× weight so that exact survey
+        numbers or document numbers boost the score more than generic terms.
+        Returns 0.0–1.0.
+        """
+        if not keywords:
+            return 0.0
+        doc_lower = doc_text.lower()
+        total_weight = 0.0
+        hit_weight = 0.0
+        for kw in keywords:
+            w = 2.0 if any(c.isdigit() for c in kw) else 1.0
+            total_weight += w
+            if kw in doc_lower:
+                hit_weight += w
+        return hit_weight / total_weight if total_weight else 0.0
 
     def query_sync(
         self,
         question_embedding: list[float],
         n_results: int = RAG_TOP_K,
         filter_filename: str | None = None,
+        filter_transaction_type: str | None = None,
+        query_text: str | None = None,
     ) -> list[RetrievedChunk]:
-        """Synchronous query using pre-computed embedding (for tool calls)."""
+        """Synchronous query using pre-computed embedding (for tool calls).
+
+        Args:
+            filter_transaction_type: Optional — restrict to chunks with this
+                transaction_type metadata (e.g. "mortgage", "sale").
+            query_text: Optional original query string for hybrid keyword
+                re-ranking.  When provided, chunks containing exact query
+                terms receive a score bonus.
+        """
         if self._indexed_count == 0:
             return []
 
-        where_filter = None
-        if filter_filename:
-            where_filter = {"filename": filter_filename}
+        where_filter = _build_where_filter(filter_filename, filter_transaction_type)
 
         try:
             results = self._collection.query(
@@ -247,6 +443,9 @@ class RAGStore:
             logger.error(f"RAGStore sync query failed: {e}")
             return []
 
+        # Extract keywords for hybrid scoring
+        keywords = self._extract_keywords(query_text) if query_text else []
+
         chunks = []
         if results and results["documents"]:
             for doc, meta, dist in zip(
@@ -257,15 +456,161 @@ class RAGStore:
                 # Apply distance threshold to sync queries too
                 if dist > RAG_MAX_DISTANCE:
                     continue
+                # Hybrid: reduce distance (= boost) for keyword matches
+                adjusted_dist = dist
+                if keywords:
+                    kw = self._keyword_score(keywords, doc)
+                    adjusted_dist = max(0.0, dist - RAG_KEYWORD_BOOST * kw)
                 chunks.append(RetrievedChunk(
                     text=doc,
                     filename=meta["filename"],
                     page_number=meta["page_number"],
                     chunk_index=meta["chunk_index"],
-                    score=dist,
+                    score=adjusted_dist,
+                    transaction_id=meta.get("transaction_id", ""),
                 ))
 
+        # Re-sort after keyword adjustment
+        if keywords and chunks:
+            chunks.sort(key=lambda c: c.score)
+
         return chunks
+
+    # ── MMR Retrieval ──
+
+    def query_mmr_sync(
+        self,
+        question_embedding: list[float],
+        n_results: int = RAG_TOP_K,
+        filter_filename: str | None = None,
+        filter_transaction_type: str | None = None,
+        lambda_param: float = RAG_MMR_LAMBDA,
+        query_text: str | None = None,
+    ) -> list[RetrievedChunk]:
+        """MMR (Maximal Marginal Relevance) retrieval for diverse results.
+
+        Fetches 3× candidates, then re-ranks using:
+          score_i = λ · (sim(q, d_i) + kw_boost)  −  (1−λ) · max_{j∈S} sim(d_i, d_j)
+
+        When *query_text* is provided, the relevance component includes a
+        keyword overlap bonus (``RAG_KEYWORD_BOOST``) so that chunks
+        containing exact identifiers (survey numbers, document numbers)
+        are prioritised even when embedding similarity alone is mediocre.
+
+        Args:
+            filter_transaction_type: Optional — restrict to chunks with this
+                transaction_type metadata (e.g. "mortgage", "sale").
+            query_text: Optional original query string for hybrid keyword
+                scoring.
+
+        Returns `n_results` chunks balancing relevance + diversity.
+        """
+        if self._indexed_count == 0:
+            return []
+
+        # Fetch 3× candidates for MMR re-ranking
+        candidate_count = min(n_results * 3, self._indexed_count)
+        where_filter = _build_where_filter(filter_filename, filter_transaction_type)
+
+        try:
+            results = self._collection.query(
+                query_embeddings=[question_embedding],
+                n_results=candidate_count,
+                where=where_filter,
+                include=["documents", "metadatas", "distances", "embeddings"],
+            )
+        except Exception as e:
+            logger.error(f"RAGStore MMR query failed: {e}")
+            return []
+
+        if not results or not results["documents"] or not results["documents"][0]:
+            return []
+
+        docs = results["documents"][0]
+        metas = results["metadatas"][0]
+        dists = results["distances"][0]
+        embeds_raw = results.get("embeddings")
+        embeds = (
+            embeds_raw[0]
+            if embeds_raw is not None and len(embeds_raw) > 0 and len(embeds_raw[0]) > 0
+            else None
+        )
+
+        # Extract keywords for hybrid scoring
+        keywords = self._extract_keywords(query_text) if query_text else []
+
+        # Apply distance threshold first
+        candidates = []
+        for i, (doc, meta, dist) in enumerate(zip(docs, metas, dists)):
+            if dist > RAG_MAX_DISTANCE:
+                continue
+            sim = 1.0 - dist  # cosine distance → similarity
+            kw_bonus = (
+                RAG_KEYWORD_BOOST * self._keyword_score(keywords, doc)
+                if keywords else 0.0
+            )
+            candidates.append({
+                "doc": doc, "meta": meta, "dist": dist,
+                "sim": sim, "kw_bonus": kw_bonus, "idx": i,
+                "embed": embeds[i] if embeds is not None else None,
+            })
+
+        if not candidates:
+            return []
+
+        # If no embeddings returned (ChromaDB config), fall back to distance ranking
+        if embeds is None:
+            # Still apply keyword boost when falling back
+            candidates.sort(key=lambda c: c["dist"] - c["kw_bonus"])
+            return [
+                RetrievedChunk(
+                    text=c["doc"], filename=c["meta"]["filename"],
+                    page_number=c["meta"]["page_number"],
+                    chunk_index=c["meta"]["chunk_index"],
+                    score=max(0.0, c["dist"] - c["kw_bonus"]),
+                    transaction_id=c["meta"].get("transaction_id", ""),
+                )
+                for c in candidates[:n_results]
+            ]
+
+        # MMR greedy selection
+        selected: list[dict] = []
+        remaining = list(candidates)
+
+        for _ in range(min(n_results, len(remaining))):
+            best_score = -float('inf')
+            best_idx = 0
+
+            for ri, cand in enumerate(remaining):
+                # Relevance to query (semantic + keyword boost)
+                rel = cand["sim"] + cand["kw_bonus"]
+
+                # Max similarity to already selected (diversity penalty)
+                max_sim_to_selected = 0.0
+                if selected and cand["embed"] is not None:
+                    for sel in selected:
+                        if sel["embed"] is not None:
+                            # Cosine similarity between candidate and selected
+                            dot = sum(a * b for a, b in zip(cand["embed"], sel["embed"]))
+                            max_sim_to_selected = max(max_sim_to_selected, dot)
+
+                mmr_score = lambda_param * rel - (1 - lambda_param) * max_sim_to_selected
+                if mmr_score > best_score:
+                    best_score = mmr_score
+                    best_idx = ri
+
+            selected.append(remaining.pop(best_idx))
+
+        return [
+            RetrievedChunk(
+                text=s["doc"], filename=s["meta"]["filename"],
+                page_number=s["meta"]["page_number"],
+                chunk_index=s["meta"]["chunk_index"],
+                score=max(0.0, s["dist"] - s["kw_bonus"]),
+                transaction_id=s["meta"].get("transaction_id", ""),
+            )
+            for s in selected
+        ]
 
     # ── Formatting ──
 

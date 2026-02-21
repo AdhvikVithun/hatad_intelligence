@@ -4,7 +4,7 @@ Your task is to extract EVERY transaction entry from this EC text. ECs in Tamil 
 
 For EACH transaction row/entry found, extract:
 - row_number: Sequential number of the entry
-- date: Date of registration (convert to YYYY-MM-DD format if possible)
+- date: Primary date — use the registration date (பதிவு நாள்). Convert to YYYY-MM-DD format if possible.
 - document_number: The registered document number  
 - document_year: Year of registration
 - sro: Sub-Registrar Office name
@@ -25,8 +25,19 @@ For EACH transaction row/entry found, extract:
 - extent: Property extent mentioned (e.g., "2 acres 3 cents", "1500 sq.ft")
 - survey_number: Survey number(s) and subdivisions mentioned
 - consideration_amount: Money amount if mentioned (in ₹)
-- remarks: Any additional notes or observations
+- remarks: Document Remarks / ஆவணக் குறிப்புகள் — financial details (mortgage terms, interest rates, etc.)
 - suspicious_flags: List any suspicious elements (e.g., "minor as seller", "same-day multiple sales", "unusually low price")
+
+ADDITIONAL FIELDS — extract these when visible in the EC row or its schedule section:
+- execution_date: Date of Execution / எழுதிக் கொ டுத்த நாள் (YYYY-MM-DD). The EC often shows 3 dates per row — this is the first one.
+- presentation_date: Date of Presentation / தாக்கல் நாள் (YYYY-MM-DD). This is the second date.
+- registration_date: Date of Registration / பதிவு நாள் (YYYY-MM-DD). This is the third date — also set in "date" field.
+- market_value: Market/Guideline Value / சந்தை மதிப்பு — the government-assessed market value (e.g., "Rs. 1,00,000/-")
+- pr_number: PR Number / முன்றாவ ஆவண எண் — Previous Registration reference number
+- plot_number: Plot No / மனை எண் from the schedule/அட்டவணை section
+- door_number: Door No / கதவு எண் (new or old) from the schedule section
+- schedule_remarks: Schedule Remarks / சொத்து விவரம் தொடர்பான குறிப்பு — property description, valuations, cross-references to other documents from the schedule section. This is SEPARATE from Document Remarks.
+- additional_details: Any other information visible in this EC entry that doesn't fit the fields above. Capture it exactly as written. Include government order references, land classification, patta transfer notes, etc.
 
 IMPORTANT GUIDELINES:
 1. Extract ALL entries - do not skip any, even if partially legible
@@ -75,8 +86,17 @@ Return ONLY valid JSON:
             "extent": "2400 sq.ft",
             "survey_number": "123/4A",
             "consideration_amount": "5000000",
-            "remarks": "",
-            "suspicious_flags": []
+            "remarks": "Document remarks text",
+            "suspicious_flags": [],
+            "execution_date": "2020-01-10",
+            "presentation_date": "2020-01-12",
+            "registration_date": "2020-01-15",
+            "market_value": "5500000",
+            "pr_number": "PR-456/2019",
+            "plot_number": "89",
+            "door_number": "119",
+            "schedule_remarks": "Schedule property description and cross-references",
+            "additional_details": ""
         }
     ],
     "extraction_notes": "Any overall observations about the EC"

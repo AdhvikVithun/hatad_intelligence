@@ -21,7 +21,7 @@ class BaseExtractor(ABC):
     """Abstract base for document-type-specific extractors."""
 
     @abstractmethod
-    async def extract(self, extracted_text: dict, on_progress: LLMProgressCallback | None = None, filename: str = "", file_path: Path | None = None) -> dict:
+    async def extract(self, extracted_text: dict, on_progress: LLMProgressCallback | None = None, filename: str = "", file_path: Path | None = None, **kwargs) -> dict:
         """Extract structured data from document text.
 
         Args:
@@ -29,6 +29,7 @@ class BaseExtractor(ABC):
             on_progress: Async callback for LLM progress updates
             filename: Original filename for labeling
             file_path: Path to original PDF (kept for API compat)
+            **kwargs: Extra parameters (e.g. rag_store, embed_fn for EC extractor)
 
         Returns:
             Structured data dict specific to document type
@@ -60,6 +61,7 @@ class TextPrimaryExtractor(BaseExtractor):
         on_progress: LLMProgressCallback | None = None,
         filename: str = "",
         file_path: Path | None = None,
+        **kwargs,
     ) -> dict:
         name = filename or "document"
 
@@ -68,23 +70,28 @@ class TextPrimaryExtractor(BaseExtractor):
         result = await self.text.extract(
             extracted_text, on_progress=on_progress,
             filename=filename, file_path=file_path,
+            **kwargs,
         )
 
         # ── Confidence assessment ───────────────────────────────────
-        from app.pipeline.confidence import assess_extraction_confidence
-
-        extraction_quality = extracted_text.get("extraction_quality", "HIGH")
-        conf = assess_extraction_confidence(
-            result, self.schema,
-            extraction_quality=extraction_quality,
-        )
-
-        # Attach confidence metadata
+        # Evaluates 6 quality signals (OCR quality, field emptiness,
+        # LLM uncertainty, date sanity, pattern validation, garbled
+        # Tamil) and produces per-field confidence scores.
         if isinstance(result, dict):
-            result["_confidence"] = conf.score
-            result["_field_confidences"] = conf.field_confidences
             result["_extraction_method"] = "text"
+            try:
+                from app.pipeline.confidence import assess_extraction_confidence
+                quality = extracted_text.get("extraction_quality", "HIGH")
+                conf = assess_extraction_confidence(
+                    result, self.schema, extraction_quality=quality,
+                )
+                result["_confidence_score"] = conf.score
+                result["_field_confidences"] = conf.field_confidences
+                if conf.weak_fields:
+                    result["_weak_fields"] = conf.weak_fields
+            except Exception as exc:
+                logger.warning(f"[{name}] Confidence assessment failed: {exc}")
 
-        logger.info(f"[{name}] Extraction complete — confidence {conf.score:.2f}")
+        logger.info(f"[{name}] Extraction complete")
         return result
 

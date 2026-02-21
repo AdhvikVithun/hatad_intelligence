@@ -30,15 +30,20 @@ Architecture notes:
 from __future__ import annotations
 
 import logging
+import re
+from collections import defaultdict
 from dataclasses import dataclass, field
+from itertools import combinations
 from typing import Any
 
 from app.pipeline.utils import (
     name_similarity,
+    base_name_similarity,
     split_name_parts,
     split_party_names,
     has_tamil,
     detect_garbled_tamil,
+    transliterate_tamil_to_latin,
 )
 from app.config import TRACE_ENABLED
 
@@ -46,6 +51,7 @@ logger = logging.getLogger(__name__)
 
 # ── Constants ──
 _MERGE_THRESHOLD = 0.50  # same as deterministic check threshold
+_BLOCK_KEY_LEN = 1       # first N chars of normalized name tokens for blocking
 _ROLE_LABELS = {
     "buyer": "Buyer",
     "seller": "Seller",
@@ -87,6 +93,7 @@ class PersonMention:
     source_type: str          # EC | SALE_DEED | PATTA | CHITTA | OTHER
     date: str = ""            # transaction date (if available)
     ocr_quality: float = 1.0  # 1.0 = clean, 0.3 = garbled
+    transaction_id: str = ""  # stable EC transaction ID (e.g. EC-5909/2012-Vadavalli)
 
     # Computed during collection
     given: str = ""           # given name component (from split_name_parts)
@@ -99,10 +106,10 @@ class PersonMention:
         # Assess OCR quality via garbled Tamil detection
         is_garbled, quality, _reason = detect_garbled_tamil(self.name)
         if is_garbled:
-            self.ocr_quality = max(0.3, 1.0 - 0.7)  # garbled → 0.3
+            self.ocr_quality = max(0.3, quality)  # use actual quality score
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "name": self.name,
             "role": self.role,
             "source_file": self.source_file,
@@ -112,6 +119,9 @@ class PersonMention:
             "given": self.given,
             "patronymic": self.patronymic,
         }
+        if self.transaction_id:
+            d["transaction_id"] = self.transaction_id
+        return d
 
 
 @dataclass
@@ -176,7 +186,7 @@ class IdentityResolver:
 
             if doc_type == "SALE_DEED":
                 self._collect_sale_deed(d, filename, doc_type)
-            elif doc_type in ("PATTA", "CHITTA"):
+            elif doc_type in ("PATTA", "CHITTA", "A_REGISTER"):
                 self._collect_patta(d, filename, doc_type)
             elif doc_type == "EC":
                 self._collect_ec(d, filename, doc_type)
@@ -219,23 +229,26 @@ class IdentityResolver:
 
     def _collect_ec(self, d: dict, filename: str, doc_type: str):
         for txn in (d.get("transactions") or []):
-            date = txn.get("registration_date", "")
+            date = txn.get("date", txn.get("registration_date", ""))
             seller = txn.get("seller_or_executant", "")
             buyer = txn.get("buyer_or_claimant", "")
+            tid = txn.get("transaction_id", "")
 
             if seller:
                 for name in split_party_names(seller):
                     if name.strip():
                         self.mentions.append(PersonMention(
                             name=name.strip(), role="ec_executant",
-                            source_file=filename, source_type=doc_type, date=date,
+                            source_file=filename, source_type=doc_type,
+                            date=date, transaction_id=tid,
                         ))
             if buyer:
                 for name in split_party_names(buyer):
                     if name.strip():
                         self.mentions.append(PersonMention(
                             name=name.strip(), role="ec_claimant",
-                            source_file=filename, source_type=doc_type, date=date,
+                            source_file=filename, source_type=doc_type,
+                            date=date, transaction_id=tid,
                         ))
 
     def _collect_generic(self, d: dict, filename: str, doc_type: str):
@@ -270,14 +283,50 @@ class IdentityResolver:
         n = len(self.mentions)
         _trace(f"IDENTITY resolving {n} mentions")
 
-        # ── Step 1: Build similarity matrix ──
+        # ── Step 0: Build blocking keys to reduce pairwise comparisons ──
+        # Mentions sharing ANY block key are compared; cross-block = 0.
+        # Keys = first 2 chars of every word token in the name.  For Tamil
+        # names we also add transliterated-Latin tokens so that cross-script
+        # pairs (e.g. "முருகன்" / "Murugan") land in the same block.
+        blocks: dict[str, list[int]] = defaultdict(list)
+        for idx, m in enumerate(self.mentions):
+            raw = (m.given or m.name).strip().lower()
+            # Remove single-letter initials like "a." / "k."
+            raw_clean = re.sub(r'\b[a-z]\.\s*', '', raw).strip() or raw
+            tokens = raw_clean.split()
+            keys: set[str] = set()
+            for tok in tokens:
+                if len(tok) >= _BLOCK_KEY_LEN:
+                    keys.add(tok[:_BLOCK_KEY_LEN])
+            # Cross-script: transliterate Tamil → Latin for shared keys
+            if has_tamil(raw):
+                latin = transliterate_tamil_to_latin(raw).lower().strip()
+                for tok in latin.split():
+                    if len(tok) >= _BLOCK_KEY_LEN:
+                        keys.add(tok[:_BLOCK_KEY_LEN])
+            if not keys:
+                keys.add("_")
+            for k in keys:
+                blocks[k].append(idx)
+
+        # Build set of pairs that need similarity computation
+        compare_pairs: set[tuple[int, int]] = set()
+        for indices in blocks.values():
+            for a in range(len(indices)):
+                for b in range(a + 1, len(indices)):
+                    compare_pairs.add((indices[a], indices[b]))
+
+        _trace(f"IDENTITY blocking: {len(blocks)} blocks, "
+               f"{len(compare_pairs)} pairs (full would be {n*(n-1)//2})")
+
+        # ── Step 1: Build sparse similarity matrix ──
         sim_matrix: list[list[float]] = [[0.0] * n for _ in range(n)]
         for i in range(n):
             sim_matrix[i][i] = 1.0
-            for j in range(i + 1, n):
-                s = name_similarity(self.mentions[i].name, self.mentions[j].name)
-                sim_matrix[i][j] = s
-                sim_matrix[j][i] = s
+        for i, j in compare_pairs:
+            s = name_similarity(self.mentions[i].name, self.mentions[j].name)
+            sim_matrix[i][j] = s
+            sim_matrix[j][i] = s
 
         # ── Step 2: Agglomerative clustering (complete linkage) ──
         # Start: each mention is its own cluster
@@ -395,9 +444,7 @@ class IdentityResolver:
         givens = [m.given for m in mentions if m.given]
         if len(givens) >= 2:
             # Check if all given names are similar
-            from itertools import combinations
             all_similar = True
-            from app.pipeline.utils import base_name_similarity
             for g1, g2 in combinations(givens, 2):
                 if base_name_similarity(g1, g2) < 0.5:
                     all_similar = False
@@ -557,8 +604,9 @@ class IdentityResolver:
                 ec_transactions.append({
                     "buyer": txn.get("buyer_or_claimant", ""),
                     "seller": txn.get("seller_or_executant", ""),
-                    "date": txn.get("registration_date", ""),
+                    "date": txn.get("date", txn.get("registration_date", "")),
                     "doc_no": txn.get("document_number", ""),
+                    "transaction_id": txn.get("transaction_id", ""),
                     "filename": filename,
                 })
 
@@ -610,15 +658,17 @@ class IdentityResolver:
                     gaps_found += 1
                     date_curr = tx_curr["date"] or "unknown date"
                     date_next = tx_next["date"] or "unknown date"
+                    tid_curr = tx_curr.get("transaction_id") or f"#{i+1}"
+                    tid_next = tx_next.get("transaction_id") or f"#{i+2}"
                     checks.append({
                         "rule_code": "DET_CHAIN_BREAK",
                         "rule_name": "Chain of Title Break (Identity)",
                         "severity": "HIGH",
                         "status": "WARNING",
                         "explanation": (
-                            f"Buyer/claimant in transaction #{i+1} ({date_curr}) "
+                            f"Buyer/claimant in {tid_curr} ({date_curr}) "
                             f"'{buyer_name}' does not match seller/executant in "
-                            f"transaction #{i+2} ({date_next}) '{seller_name}'. "
+                            f"{tid_next} ({date_next}) '{seller_name}'. "
                             f"No identity cluster links these names — this may indicate "
                             f"a gap in the chain of title."
                         ),
@@ -628,8 +678,8 @@ class IdentityResolver:
                             "intermediate transactions (inheritance, partition, gift)."
                         ),
                         "evidence": (
-                            f"Tx #{i+1} buyer='{buyer_name}' ({date_curr}) → "
-                            f"Tx #{i+2} seller='{seller_name}' ({date_next}): "
+                            f"{tid_curr} buyer='{buyer_name}' ({date_curr}) → "
+                            f"{tid_next} seller='{seller_name}' ({date_next}): "
                             f"No identity link found"
                         ),
                         "source": "deterministic",

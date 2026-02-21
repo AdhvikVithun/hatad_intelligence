@@ -326,6 +326,118 @@ class TestAreaConsistency:
         checks = check_area_consistency(data)
         assert "DET_AREA_MISMATCH" in _codes(checks)
 
+    # ── Patta-portfolio-aware tests ──
+
+    def test_patta_portfolio_no_false_mismatch(self):
+        """Multi-survey Patta with matching survey → uses only matching extent, no mismatch."""
+        data = {
+            **_sale_deed(survey="317", extent="2400 sq.ft"),
+            "patta.pdf": {
+                "document_type": "PATTA",
+                "data": {
+                    "patta_number": "P-637",
+                    "survey_numbers": [
+                        {"survey_no": "317", "extent": "2400 sq.ft", "classification": "Dry"},
+                        {"survey_no": "543/1A1", "extent": "3000 sq.ft", "classification": "Dry"},
+                        {"survey_no": "544/1A1", "extent": "5000 sq.ft", "classification": "Wet"},
+                    ],
+                    "total_extent": "1.0650 hectares",
+                    "village": "Chromepet",
+                },
+            },
+        }
+        checks = check_area_consistency(data)
+        assert "DET_AREA_MISMATCH" not in _codes(checks)
+
+    def test_patta_portfolio_info_emitted(self):
+        """Multi-survey Patta whose total_extent >> matched extent → DET_PATTA_PORTFOLIO INFO."""
+        data = {
+            **_sale_deed(survey="317", extent="2400 sq.ft"),
+            "patta.pdf": {
+                "document_type": "PATTA",
+                "data": {
+                    "patta_number": "P-637",
+                    "survey_numbers": [
+                        {"survey_no": "317", "extent": "2400 sq.ft"},
+                        {"survey_no": "543", "extent": "10000 sq.ft"},
+                    ],
+                    "total_extent": "12400 sq.ft",
+                    "village": "Chromepet",
+                },
+            },
+        }
+        checks = check_area_consistency(data)
+        assert "DET_AREA_MISMATCH" not in _codes(checks)
+        assert "DET_PATTA_PORTFOLIO" in _codes(checks)
+        c = _find(checks, "DET_PATTA_PORTFOLIO")
+        assert c["status"] == "INFO"
+        assert c["severity"] == "LOW"
+
+    def test_patta_portfolio_genuine_mismatch(self):
+        """Even with portfolio filtering, a real extent mismatch on the matching survey flags FAIL."""
+        data = {
+            **_sale_deed(survey="317", extent="2400 sq.ft"),
+            "patta.pdf": {
+                "document_type": "PATTA",
+                "data": {
+                    "patta_number": "P-637",
+                    "survey_numbers": [
+                        {"survey_no": "317", "extent": "5000 sq.ft"},
+                        {"survey_no": "543", "extent": "3000 sq.ft"},
+                    ],
+                    "total_extent": "8000 sq.ft",
+                    "village": "Chromepet",
+                },
+            },
+        }
+        checks = check_area_consistency(data)
+        assert "DET_AREA_MISMATCH" in _codes(checks)
+
+    def test_patta_no_matching_survey_skips(self):
+        """Patta with no overlapping surveys → no area mismatch (nothing to compare)."""
+        data = {
+            **_sale_deed(survey="317", extent="2400 sq.ft"),
+            "patta.pdf": {
+                "document_type": "PATTA",
+                "data": {
+                    "patta_number": "P-637",
+                    "survey_numbers": [
+                        {"survey_no": "543", "extent": "10000 sq.ft"},
+                        {"survey_no": "544", "extent": "5000 sq.ft"},
+                    ],
+                    "total_extent": "15000 sq.ft",
+                    "village": "Chromepet",
+                },
+            },
+        }
+        checks = check_area_consistency(data)
+        assert "DET_AREA_MISMATCH" not in _codes(checks)
+
+    def test_patta_union_of_non_patta_surveys(self):
+        """Target surveys union: EC survey 317 + Sale Deed survey 317 → same target, Patta filters correctly."""
+        ec = _ec("01-01-2010", "31-12-2025", [
+            {"row_number": 1, "date": "01-01-2015", "transaction_type": "Sale",
+             "survey_number": "317"},
+        ])
+        data = {
+            **_sale_deed(survey="317", extent="2400 sq.ft"),
+            **ec,
+            "patta.pdf": {
+                "document_type": "PATTA",
+                "data": {
+                    "patta_number": "P-637",
+                    "survey_numbers": [
+                        {"survey_no": "317", "extent": "2400 sq.ft"},
+                        {"survey_no": "999", "extent": "50000 sq.ft"},
+                    ],
+                    "total_extent": "52400 sq.ft",
+                    "village": "Chromepet",
+                },
+            },
+        }
+        checks = check_area_consistency(data)
+        assert "DET_AREA_MISMATCH" not in _codes(checks)
+
 
 # ═══════════════════════════════════════════════════
 # 6. check_survey_number_consistency
@@ -340,13 +452,15 @@ class TestSurveyNumberConsistency:
         assert "DET_SURVEY_MISMATCH" not in _codes(checks)
 
     def test_mismatched_surveys(self):
-        """Completely different survey numbers → DET_SURVEY_MISMATCH."""
+        """Completely different Patta survey vs Sale Deed → Patta-only cluster (INFO),
+        not CRITICAL FAIL, because Patta is an owner-portfolio document."""
         data = {**_sale_deed(survey="311/1"), **_patta(survey_no="999/5")}
         checks = check_survey_number_consistency(data)
-        assert "DET_SURVEY_MISMATCH" in _codes(checks)
-        c = _find(checks, "DET_SURVEY_MISMATCH")
-        assert c["severity"] == "CRITICAL"
-        assert c["status"] == "FAIL"
+        # No CRITICAL FAIL — Patta's 999/5 is just the owner's other holding
+        assert "DET_SURVEY_MISMATCH" not in _codes(checks)
+        assert "DET_PATTA_ONLY_SURVEYS" in _codes(checks)
+        c = _find(checks, "DET_PATTA_ONLY_SURVEYS")
+        assert c["status"] == "INFO"
 
     def test_subdivision_info(self):
         """Parent-child surveys + a third mismatching doc → DET_SURVEY_SUBDIVISION (INFO).
@@ -384,6 +498,105 @@ class TestSurveyNumberConsistency:
         data = _sale_deed(survey="311/1")
         checks = check_survey_number_consistency(data)
         assert checks == []
+
+    # ── Patta-portfolio-aware tests ──
+
+    def test_patta_extra_surveys_no_fail(self):
+        """Patta with extra surveys (owner portfolio) + matching EC survey → no DET_SURVEY_MISMATCH."""
+        data = {
+            **_sale_deed(survey="317"),
+            "patta.pdf": {
+                "document_type": "PATTA",
+                "data": {
+                    "patta_number": "P-637",
+                    "survey_numbers": [
+                        {"survey_no": "317"},
+                        {"survey_no": "543/1A1"},
+                        {"survey_no": "544/1A1"},
+                    ],
+                    "village": "Chromepet",
+                },
+            },
+        }
+        checks = check_survey_number_consistency(data)
+        assert "DET_SURVEY_MISMATCH" not in _codes(checks)
+        # Patta-only surveys should be INFO
+        assert "DET_PATTA_ONLY_SURVEYS" in _codes(checks)
+        c = _find(checks, "DET_PATTA_ONLY_SURVEYS")
+        assert c["status"] == "INFO"
+        assert c["severity"] == "LOW"
+
+    def test_non_patta_disagree_still_fail(self):
+        """Two non-Patta documents with different surveys → still CRITICAL FAIL."""
+        ec = _ec("01-01-2010", "31-12-2025", [
+            {"row_number": 1, "date": "01-01-2015", "transaction_type": "Sale",
+             "survey_number": "999/5"},
+        ])
+        data = {**_sale_deed(survey="311/1"), **ec}
+        checks = check_survey_number_consistency(data)
+        assert "DET_SURVEY_MISMATCH" in _codes(checks)
+        c = _find(checks, "DET_SURVEY_MISMATCH")
+        assert c["severity"] == "CRITICAL"
+        assert c["status"] == "FAIL"
+
+    def test_patta_portfolio_with_ec_no_fail(self):
+        """EC survey 317 matches one Patta survey, extra Patta surveys → no FAIL, only INFO."""
+        ec = _ec("01-01-2010", "31-12-2025", [
+            {"row_number": 1, "date": "01-01-2015", "transaction_type": "Sale",
+             "survey_number": "317"},
+        ])
+        data = {
+            **ec,
+            "patta.pdf": {
+                "document_type": "PATTA",
+                "data": {
+                    "patta_number": "P-637",
+                    "survey_numbers": [
+                        {"survey_no": "317"},
+                        {"survey_no": "543/1A1"},
+                        {"survey_no": "543/1C1"},
+                        {"survey_no": "544/1A1"},
+                        {"survey_no": "544/1B1"},
+                    ],
+                    "village": "Chromepet",
+                },
+            },
+        }
+        checks = check_survey_number_consistency(data)
+        assert "DET_SURVEY_MISMATCH" not in _codes(checks)
+        assert "DET_PATTA_ONLY_SURVEYS" in _codes(checks)
+
+    def test_patta_wrong_number_still_flags(self):
+        """If Patta and EC reference entirely different surveys with no match,
+        that IS a legitimate problem (wrong Patta for this property).
+        Only the EC can create a shared cluster → 1 shared cluster, no FAIL.
+        But the Patta-only cluster still gets INFO.
+        """
+        ec = _ec("01-01-2010", "31-12-2025", [
+            {"row_number": 1, "date": "01-01-2015", "transaction_type": "Sale",
+             "survey_number": "317"},
+        ])
+        data = {
+            **_sale_deed(survey="317"),
+            **ec,
+            "patta.pdf": {
+                "document_type": "PATTA",
+                "data": {
+                    "patta_number": "P-999",
+                    "survey_numbers": [
+                        {"survey_no": "888/1"},
+                        {"survey_no": "888/2"},
+                    ],
+                    "village": "Chromepet",
+                },
+            },
+        }
+        checks = check_survey_number_consistency(data)
+        # Sale deed + EC both have 317 → 1 shared cluster
+        # Patta has 888/1, 888/2 → patta-only cluster(s)
+        # No DET_SURVEY_MISMATCH because only 1 shared cluster
+        assert "DET_SURVEY_MISMATCH" not in _codes(checks)
+        assert "DET_PATTA_ONLY_SURVEYS" in _codes(checks)
 
 
 # ═══════════════════════════════════════════════════
@@ -1121,10 +1334,14 @@ class TestSurveyTypeAwareness:
         assert "DET_SURVEY_TYPE_DIFF" not in _codes(checks)
 
     def test_mismatch_with_type_note(self):
-        """Different numbers AND different types → MISMATCH with type note in explanation."""
+        """Different numbers AND different types across non-Patta docs → MISMATCH with type note."""
+        ec = _ec("01-01-2010", "31-12-2025", [
+            {"row_number": 1, "date": "01-01-2015", "transaction_type": "Sale",
+             "survey_number": "T.S.No. 45"},
+        ])
         data = {
             **_sale_deed(survey="O.S.No. 120"),
-            **_patta(survey_no="T.S.No. 45"),
+            **ec,
         }
         checks = check_survey_number_consistency(data)
         assert "DET_SURVEY_MISMATCH" in _codes(checks)
@@ -1614,8 +1831,87 @@ class TestComputeScoreDeductions:
 
 
 # ═══════════════════════════════════════════════════
-# SURVEY NUMBER HARDENING TESTS
+# PER-CHECK CONFIDENCE ANNOTATION TESTS
 # ═══════════════════════════════════════════════════
+
+class TestAnnotateCheckConfidence:
+    """Tests for _annotate_check_confidence per-check metadata."""
+
+    def test_high_confidence_annotated(self):
+        from app.pipeline.orchestrator import _annotate_check_confidence
+        checks = [{"rule_code": "X", "status": "PASS"}]
+        extracted = {
+            "doc.pdf": {
+                "document_type": "EC",
+                "data": {"_confidence_score": 0.92},
+            }
+        }
+        _annotate_check_confidence(checks, extracted, ["EC"])
+        assert checks[0]["data_confidence"] == "HIGH"
+        assert checks[0]["data_confidence_score"] == 0.92
+
+    def test_low_confidence_annotated(self):
+        from app.pipeline.orchestrator import _annotate_check_confidence
+        checks = [{"rule_code": "X", "status": "FAIL"}]
+        extracted = {
+            "doc.pdf": {
+                "document_type": "SALE_DEED",
+                "data": {"_confidence_score": 0.35},
+            }
+        }
+        _annotate_check_confidence(checks, extracted, ["SALE_DEED"])
+        assert checks[0]["data_confidence"] == "VERY_LOW"
+        assert checks[0]["data_confidence_score"] == 0.35
+
+    def test_min_across_doc_types(self):
+        """Cross-doc groups should use the minimum confidence across documents."""
+        from app.pipeline.orchestrator import _annotate_check_confidence
+        checks = [{"rule_code": "X", "status": "PASS"}]
+        extracted = {
+            "ec.pdf": {
+                "document_type": "EC",
+                "data": {"_confidence_score": 0.95},
+            },
+            "patta.pdf": {
+                "document_type": "PATTA",
+                "data": {"_confidence_score": 0.55},
+            },
+        }
+        _annotate_check_confidence(checks, extracted, ["EC", "PATTA"])
+        assert checks[0]["data_confidence"] == "LOW"
+        assert checks[0]["data_confidence_score"] == 0.55
+
+    def test_irrelevant_doc_types_ignored(self):
+        """Only doc types in needed_types are considered."""
+        from app.pipeline.orchestrator import _annotate_check_confidence
+        checks = [{"rule_code": "X", "status": "PASS"}]
+        extracted = {
+            "ec.pdf": {
+                "document_type": "EC",
+                "data": {"_confidence_score": 0.90},
+            },
+            "sale.pdf": {
+                "document_type": "SALE_DEED",
+                "data": {"_confidence_score": 0.30},  # low but irrelevant
+            },
+        }
+        _annotate_check_confidence(checks, extracted, ["EC"])
+        assert checks[0]["data_confidence"] == "HIGH"
+        assert checks[0]["data_confidence_score"] == 0.9
+
+    def test_no_confidence_no_annotation(self):
+        """If no documents have confidence scores, checks unchanged."""
+        from app.pipeline.orchestrator import _annotate_check_confidence
+        checks = [{"rule_code": "X", "status": "PASS"}]
+        extracted = {
+            "ec.pdf": {"document_type": "EC", "data": {"ec_number": "123"}},
+        }
+        _annotate_check_confidence(checks, extracted, ["EC"])
+        assert "data_confidence" not in checks[0]
+
+    def test_empty_checks_no_error(self):
+        from app.pipeline.orchestrator import _annotate_check_confidence
+        _annotate_check_confidence([], {}, ["EC"])  # should not raise
 
 class TestTSNoPrefixInEC:
     """EC property_description with T.S.No., O.S.No., N.S.No. prefixes
@@ -1693,3 +1989,162 @@ class TestIntraECSurveyConsistency:
         data = {**_sale_deed(survey="311"), **ec}
         checks = check_survey_number_consistency(data)
         assert "DET_EC_INTERNAL_SURVEY_INCONSISTENCY" not in _codes(checks)
+
+
+# ═══════════════════════════════════════════════════
+# A_REGISTER treated identically to PATTA/CHITTA
+# ═══════════════════════════════════════════════════
+
+def _a_register(survey_no: str = "311/1", extent: str = "2400 sq.ft",
+                village: str = "Chromepet", taluk: str = "Tambaram",
+                district: str = "Chengalpattu",
+                owners: list | None = None) -> dict:
+    """Build a minimal A_REGISTER extracted_data (same schema as Patta)."""
+    return {
+        "a_register.pdf": {
+            "document_type": "A_REGISTER",
+            "data": {
+                "patta_number": "P-001",
+                "survey_numbers": [{"survey_no": survey_no, "extent": extent}],
+                "total_extent": extent,
+                "village": village,
+                "taluk": taluk,
+                "district": district,
+                "owner_names": owners or [{"name": "Buyer B"}],
+            },
+        }
+    }
+
+
+class TestARegisterParity:
+    """A_REGISTER must behave identically to PATTA in all deterministic checks."""
+
+    def test_area_consistency_uses_a_register(self):
+        """A_REGISTER extent is compared like Patta."""
+        data = {
+            **_sale_deed(survey="317", extent="2400 sq.ft"),
+            "a_register.pdf": {
+                "document_type": "A_REGISTER",
+                "data": {
+                    "patta_number": "P-637",
+                    "survey_numbers": [
+                        {"survey_no": "317", "extent": "2400 sq.ft", "classification": "Dry"},
+                    ],
+                    "total_extent": "2400 sq.ft",
+                    "village": "Chromepet",
+                },
+            },
+        }
+        checks = check_area_consistency(data)
+        assert "DET_AREA_MISMATCH" not in _codes(checks)
+
+    def test_survey_consistency_uses_a_register(self):
+        """A_REGISTER surveys grouped like Patta surveys."""
+        data = {
+            **_sale_deed(survey="317"),
+            "a_register.pdf": {
+                "document_type": "A_REGISTER",
+                "data": {
+                    "survey_numbers": [{"survey_no": "317", "extent": "2400 sq.ft"}],
+                    "total_extent": "2400 sq.ft",
+                },
+            },
+        }
+        checks = check_survey_number_consistency(data)
+        assert "DET_SURVEY_MISMATCH" not in _codes(checks)
+
+    def test_buyer_a_register_owner_match(self):
+        """Buyer matches A_REGISTER owner → no mismatch."""
+        data = {
+            **_sale_deed(buyers=[{"name": "Lakshmi W/o Senthil"}]),
+            **_a_register(owners=[{"name": "Lakshmi"}]),
+        }
+        checks = check_party_name_consistency(data)
+        assert "DET_BUYER_PATTA_MISMATCH" not in _codes(checks)
+
+    def test_buyer_a_register_owner_mismatch(self):
+        """Buyer different from A_REGISTER owner → DET_BUYER_PATTA_MISMATCH."""
+        data = {
+            **_sale_deed(buyers=[{"name": "Raman S/o Krishnan"}]),
+            **_a_register(owners=[{"name": "Velan S/o Murugan"}]),
+        }
+        checks = check_party_name_consistency(data)
+        assert "DET_BUYER_PATTA_MISMATCH" in _codes(checks)
+
+    def test_a_register_in_document_types_config(self):
+        """A_REGISTER is in the global DOCUMENT_TYPES whitelist."""
+        from app.config import DOCUMENT_TYPES
+        assert "A_REGISTER" in DOCUMENT_TYPES
+
+    def test_a_register_extra_surveys_patta_only(self):
+        """A_REGISTER with extra surveys not in EC/SaleDeed → patta-only cluster (INFO)."""
+        data = {
+            **_sale_deed(survey="317"),
+            "a_register.pdf": {
+                "document_type": "A_REGISTER",
+                "data": {
+                    "survey_numbers": [
+                        {"survey_no": "317", "extent": "2400 sq.ft"},
+                        {"survey_no": "999", "extent": "5000 sq.ft"},
+                    ],
+                    "total_extent": "7400 sq.ft",
+                },
+            },
+        }
+        checks = check_survey_number_consistency(data)
+        # Survey 999 only in A_REGISTER → patta-only cluster, no CRITICAL fail
+        assert "DET_SURVEY_MISMATCH" not in _codes(checks)
+        # May emit DET_PATTA_ONLY_SURVEYS INFO
+        patta_only = [c for c in checks if c["rule_code"] == "DET_PATTA_ONLY_SURVEYS"]
+        assert len(patta_only) >= 1
+
+
+# ═══════════════════════════════════════════════════
+# Seller ↔ Patta owner: mutation pending logic
+# ═══════════════════════════════════════════════════
+
+class TestPattaMutationPending:
+    """When seller matches patta owner but buyer doesn't, emit INFO not WARNING."""
+
+    def test_seller_matches_patta_owner_fuzzy(self):
+        """Seller == patta owner, buyer != patta owner → INFO (mutation pending), not WARNING."""
+        data = {
+            **_sale_deed(
+                sellers=[{"name": "Sathyabama W/o Thulasi Ram"}],
+                buyers=[{"name": "Pon Arasi W/o Arulsing"}],
+            ),
+            **_patta(owners=[{"name": "Sathyabama"}]),
+        }
+        checks = check_party_name_consistency(data)
+        # Should NOT emit WARNING mismatch
+        assert "DET_BUYER_PATTA_MISMATCH" not in _codes(checks)
+        # Should emit INFO about pending mutation
+        match_checks = [c for c in checks if c["rule_code"] == "DET_BUYER_PATTA_MATCH"]
+        assert len(match_checks) >= 1
+        assert match_checks[0]["severity"] == "MEDIUM"
+        assert match_checks[0]["status"] == "INFO"
+
+    def test_neither_matches_still_warns(self):
+        """Buyer AND seller both different from patta owner → WARNING remains."""
+        data = {
+            **_sale_deed(
+                sellers=[{"name": "Totally Different Person"}],
+                buyers=[{"name": "Another Unknown Person"}],
+            ),
+            **_patta(owners=[{"name": "Velan S/o Murugan"}]),
+        }
+        checks = check_party_name_consistency(data)
+        assert "DET_BUYER_PATTA_MISMATCH" in _codes(checks)
+
+    def test_buyer_matches_patta_owner_still_pass(self):
+        """Buyer == patta owner → PASS (existing behavior, mutation already done)."""
+        data = {
+            **_sale_deed(
+                sellers=[{"name": "Old Owner"}],
+                buyers=[{"name": "Lakshmi W/o Senthil"}],
+            ),
+            **_patta(owners=[{"name": "Lakshmi"}]),
+        }
+        checks = check_party_name_consistency(data)
+        assert "DET_BUYER_PATTA_MISMATCH" not in _codes(checks)
+

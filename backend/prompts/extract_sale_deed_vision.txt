@@ -19,9 +19,11 @@ REGISTRATION DETAILS:
 - sro: Sub-Registrar Office name (சார்பதிவாளர் அலுவலகம்)
 
 SELLER DETAILS (விற்பனையாளர்):
-- Read ALL seller names. Each seller entry needs: name, father_name (S/o / D/o / W/o), age, address
+- Read ALL seller names. Each seller entry needs: name, father_name (S/o / D/o / W/o), age, address, pan
 - Multiple sellers may be joined by "மற்றும்" (and) or comma-separated
 - S/o = மகன், D/o = மகள், W/o = மனைவி
+- JOINT SELLERS: "திரு. X அவர்கள் மனைவி திருமதி. Y" = X AND Y are BOTH sellers, list separately.
+  Each person with a PAN is a separate entry. Count signatures to verify all parties are listed.
 
 BUYER DETAILS (வாங்குபவர்):
 - Read ALL buyer names similarly with father_name, age, address
@@ -48,7 +50,9 @@ The property schedule is typically a table with these columns:
 Read each column carefully. The schedule may span multiple pages — check all pages.
 
 FINANCIAL DETAILS:
-- consideration_amount: Sale price in ₹ (விற்பனை தொகை)
+- consideration_amount: Sale price in ₹ (விற்பனை தொகை) — the TOTAL sale price.
+  Look for "ரூபாய் X/-க்கு கிரயம்" on the stamp paper header.
+  Strip commas and return as integer (e.g., 5,67,92,000 → 56792000). NEVER return 0 if an amount is visible.
 - guideline_value: Government guideline value if shown
 - stamp_duty: Stamp duty paid (முத்திரை கட்டணம்)
 - registration_fee: Registration fee paid (பதிவு கட்டணம்)
@@ -60,6 +64,8 @@ PREVIOUS OWNERSHIP:
 
 WITNESSES (சாட்சிகள்):
 - List all witness names
+- Prefer PRINTED text over handwritten signatures (handwritten names may be garbled by OCR)
+- If a name is partially illegible, note "[partially illegible]" — do NOT include garbled character sequences
 
 SPECIAL CONDITIONS:
 - Any restrictions, covenants, easements, or special clauses

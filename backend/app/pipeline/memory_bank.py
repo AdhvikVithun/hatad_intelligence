@@ -62,6 +62,7 @@ class Fact:
         source_type: str,
         confidence: float = 1.0,
         context: str = "",
+        transaction_id: str = "",
     ):
         self.category = category
         self.key = key
@@ -70,10 +71,11 @@ class Fact:
         self.source_type = source_type
         self.confidence = confidence
         self.context = context
+        self.transaction_id = transaction_id
         self.timestamp = datetime.now().isoformat()
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "category": self.category,
             "key": self.key,
             "value": self.value,
@@ -83,6 +85,9 @@ class Fact:
             "context": self.context,
             "timestamp": self.timestamp,
         }
+        if self.transaction_id:
+            d["transaction_id"] = self.transaction_id
+        return d
 
     def __repr__(self):
         return f"Fact({self.category}/{self.key}={self.value} from {self.source_file})"
@@ -152,7 +157,7 @@ class MemoryBank:
             self._ingest_ec(filename, data)
         elif doc_type == "SALE_DEED":
             self._ingest_sale_deed(filename, data)
-        elif doc_type in ("PATTA", "CHITTA"):
+        elif doc_type in ("PATTA", "CHITTA", "A_REGISTER"):
             self._ingest_patta(filename, data)
         else:
             self._ingest_generic(filename, doc_type, data)
@@ -160,6 +165,35 @@ class MemoryBank:
         self._ingested_files.append(filename)
         added = len(self.facts) - before
         logger.info(f"MemoryBank: {added} facts from {filename} ({doc_type})")
+        return added
+
+    def ingest_risk_classification(self, filename: str, ec_data: dict) -> int:
+        """Store transaction risk classification facts from EC analysis.
+
+        Iterates EC transactions and stores a ``risk`` fact for each
+        CRITICAL (encumbrance/judicial) transaction so verification can
+        query high-risk items from the knowledge base.
+        """
+        from app.pipeline.utils import ENCUMBRANCE_TYPES, JUDICIAL_TYPES
+
+        before = len(self.facts)
+        for txn in (ec_data.get("transactions") or []):
+            txn_type = (txn.get("transaction_type") or "").strip().lower()
+            tid = txn.get("transaction_id", "")
+            if txn_type in ENCUMBRANCE_TYPES or txn_type in JUDICIAL_TYPES:
+                self._add_fact(
+                    "risk", "high_risk_transaction",
+                    f"{txn_type} (Doc {txn.get('document_number', '?')}, "
+                    f"{txn.get('date', '?')})",
+                    filename, "EC",
+                    context=f"Row #{txn.get('row_number', '?')}: "
+                            f"{txn.get('seller_or_executant', '?')} → "
+                            f"{txn.get('buyer_or_claimant', '?')}",
+                    transaction_id=tid,
+                )
+        added = len(self.facts) - before
+        if added:
+            logger.info(f"MemoryBank: {added} risk facts from {filename}")
         return added
 
     # ── EC ingestion ──
@@ -190,6 +224,7 @@ class MemoryBank:
         #   consideration_amount (not consideration_value)
         owners_seen = set()
         for txn in transactions:
+            tid = txn.get("transaction_id", "")
             # Parties — schema uses seller_or_executant / buyer_or_claimant
             for schema_field, fact_label in [
                 ("seller_or_executant", "ec_executant"),
@@ -204,7 +239,8 @@ class MemoryBank:
                             self._add_fact(
                                 "party", fact_label,
                                 individual, src, stype,
-                                context=f"Transaction #{txn.get('row_number', '?')}: {txn.get('transaction_type', '')}"
+                                context=f"Transaction #{txn.get('row_number', '?')}: {txn.get('transaction_type', '')}",
+                                transaction_id=tid,
                             )
 
             # Document references within EC
@@ -213,7 +249,8 @@ class MemoryBank:
                 self._add_fact(
                     "reference", "ec_doc_number",
                     doc_num, src, stype,
-                    context=f"{txn.get('transaction_type', '')} dated {txn.get('date', '?')}"
+                    context=f"{txn.get('transaction_type', '')} dated {txn.get('date', '?')}",
+                    transaction_id=tid,
                 )
 
             # Financial data from EC transactions — schema uses consideration_amount
@@ -222,7 +259,8 @@ class MemoryBank:
                 self._add_fact(
                     "financial", "ec_consideration",
                     consideration, src, stype,
-                    context=f"Doc #{doc_num or '?'}: {txn.get('transaction_type', '')}"
+                    context=f"Doc #{doc_num or '?'}: {txn.get('transaction_type', '')}",
+                    transaction_id=tid,
                 )
 
             # Encumbrance types — schema uses transaction_type
@@ -231,7 +269,31 @@ class MemoryBank:
                 self._add_fact(
                     "encumbrance", "ec_transaction_type",
                     nature.strip(), src, stype,
-                    context=f"#{txn.get('row_number', '?')} dated {txn.get('date', '?')}"
+                    context=f"#{txn.get('row_number', '?')} dated {txn.get('date', '?')}",
+                    transaction_id=tid,
+                )
+
+            # Per-transaction survey numbers — critical for cross-document verification
+            survey = txn.get("survey_number")
+            if survey and isinstance(survey, str) and survey.strip():
+                self._add_fact(
+                    "property", "ec_survey_number",
+                    survey.strip(), src, stype,
+                    context=f"Transaction #{txn.get('row_number', '?')}: "
+                            f"{txn.get('transaction_type', '')} - "
+                            f"Doc {txn.get('document_number', '?')}",
+                    transaction_id=tid,
+                )
+
+            # Per-transaction dates — enables temporal queries in verification
+            txn_date = txn.get("date")
+            if txn_date and isinstance(txn_date, str) and txn_date.strip():
+                self._add_fact(
+                    "timeline", "ec_transaction_date",
+                    txn_date.strip(), src, stype,
+                    context=f"#{txn.get('row_number', '?')}: "
+                            f"{txn.get('transaction_type', '')} Doc {txn.get('document_number', '?')}",
+                    transaction_id=tid,
                 )
 
         # Build ownership chain summary
@@ -246,6 +308,7 @@ class MemoryBank:
                         "type": txn.get("transaction_type"),
                         "date": txn.get("date"),
                         "doc_no": txn.get("document_number"),
+                        "transaction_id": txn.get("transaction_id", ""),
                     })
             if chain:
                 self._add_fact("chain", "ownership_transfers", chain, src, stype)
@@ -284,6 +347,13 @@ class MemoryBank:
             self._add_fact("property", "survey_number", prop.get("survey_number"), src, stype)
             self._add_fact("property", "extent", prop.get("extent"), src, stype)
             self._add_fact("property", "boundaries", prop.get("boundaries"), src, stype)
+            # Parse individual boundary directions for cross-doc comparison
+            boundaries = prop.get("boundaries")
+            if isinstance(boundaries, dict):
+                for direction in ("north", "south", "east", "west"):
+                    val = boundaries.get(direction)
+                    if val:
+                        self._add_fact("property", f"boundary_{direction}", val, src, stype)
             self._add_fact("property", "village", prop.get("village"), src, stype)
             self._add_fact("property", "taluk", prop.get("taluk"), src, stype)
             self._add_fact("property", "district", prop.get("district"), src, stype)
@@ -296,6 +366,13 @@ class MemoryBank:
             self._add_fact("financial", "guideline_value", fin.get("guideline_value"), src, stype)
             self._add_fact("financial", "stamp_duty", fin.get("stamp_duty"), src, stype)
             self._add_fact("financial", "registration_fee", fin.get("registration_fee"), src, stype)
+
+        # Witnesses — store as party facts for identity resolution
+        witnesses = data.get("witnesses", [])
+        if isinstance(witnesses, list):
+            for w in witnesses:
+                if isinstance(w, str) and w.strip():
+                    self._add_fact("party", "witness", w.strip(), src, stype)
 
         # Previous ownership
         prev = data.get("previous_ownership")
@@ -315,19 +392,30 @@ class MemoryBank:
         if isinstance(survey_numbers, list) and survey_numbers:
             survey_nos = [s.get("survey_no", "") for s in survey_numbers if isinstance(s, dict)]
             self._add_fact("property", "survey_number", ", ".join(filter(None, survey_nos)), src, stype)
-            # Also add individual survey details
+            # Add individual survey details + per-survey extent facts
             for sn in survey_numbers:
                 if isinstance(sn, dict) and sn.get("survey_no"):
-                    self._add_fact("property", f"survey_{sn['survey_no']}_extent",
-                                   sn.get("extent"), src, stype)
-                    self._add_fact("property", f"survey_{sn['survey_no']}_class",
+                    sn_no = sn["survey_no"]
+                    sn_ext = sn.get("extent")
+                    self._add_fact("property", f"survey_{sn_no}_extent",
+                                   sn_ext, src, stype)
+                    self._add_fact("property", f"survey_{sn_no}_class",
                                    sn.get("classification"), src, stype)
+                    # Per-survey extent as a first-class extent fact w/ survey context
+                    # so that conflict detection can compare survey-by-survey.
+                    if sn_ext:
+                        self._add_fact("property", "extent", sn_ext, src, stype,
+                                       context=f"Survey {sn_no}")
         else:
             # Fallback for non-schema data
             self._add_fact("property", "survey_number", data.get("survey_number"), src, stype)
 
-        # Extent — schema uses total_extent
-        self._add_fact("property", "extent", data.get("total_extent") or data.get("extent") or data.get("area"), src, stype)
+        # Aggregate total_extent — stored as separate key for ceiling/compliance checks.
+        # NOT stored as generic "extent" to avoid false-positive mismatch with
+        # single-survey extents from EC / Sale Deed.
+        self._add_fact("property", "total_patta_extent",
+                       data.get("total_extent") or data.get("extent") or data.get("area"),
+                       src, stype)
         self._add_fact("property", "village", data.get("village"), src, stype)
         self._add_fact("property", "taluk", data.get("taluk"), src, stype)
         self._add_fact("property", "district", data.get("district"), src, stype)
@@ -393,11 +481,14 @@ class MemoryBank:
     # ── Core helpers ──
 
     def _add_fact(self, category: str, key: str, value: Any, src: str, stype: str,
-                  confidence: float = 1.0, context: str = ""):
+                  confidence: float = 1.0, context: str = "", transaction_id: str = ""):
         """Add a fact if the value is non-empty."""
         if value is None or (isinstance(value, str) and not value.strip()):
             return
-        self.facts.append(Fact(category, key, value, src, stype, confidence, context))
+        self.facts.append(Fact(
+            category, key, value, src, stype,
+            confidence, context, transaction_id=transaction_id,
+        ))
 
     # ── Conflict detection ──
 
@@ -480,54 +571,81 @@ class MemoryBank:
                                     ),
                                 ))
 
-        # --- Extent (unit-aware) ---
+        # --- Extent (unit-aware, Patta-portfolio filtered) ---
+        # Patta now stores per-survey extent facts with context="Survey NNN".
+        # Only compare Patta extents whose survey matches a non-Patta document's
+        # survey, avoiding false conflicts from the owner's other holdings.
         extent_facts = groups.get(("property", "extent"), [])
         if len(extent_facts) >= 2:
-            by_source_ext: dict[str, "Fact"] = {}
-            for f in extent_facts:
-                by_source_ext.setdefault(f.source_file, f)
-            if len(by_source_ext) >= 2:
-                ext_facts_list = list(by_source_ext.values())
-                # Try numeric comparison via parse_area_to_sqft
-                sqft_values: list[tuple["Fact", float | None]] = []
-                for f in ext_facts_list:
-                    sqft_values.append((f, parse_area_to_sqft(str(f.value))))
+            _PATTA_STYPES = {"PATTA", "CHITTA"}
 
-                parsed = [(f, v) for f, v in sqft_values if v is not None and v > 0]
-                if len(parsed) >= 2:
-                    # All parseable — compare numerically with 10% tolerance
-                    ref_fact, ref_sqft = parsed[0]
-                    conflict_found = False
-                    for other_fact, other_sqft in parsed[1:]:
-                        diff_ratio = abs(ref_sqft - other_sqft) / max(ref_sqft, other_sqft)
-                        if diff_ratio > 0.10:  # >10% difference
-                            conflict_found = True
+            # Gather non-Patta survey numbers for matching
+            non_patta_surveys: list[str] = []
+            for sf in groups.get(("property", "survey_number"), []):
+                if sf.source_type not in _PATTA_STYPES:
+                    non_patta_surveys.extend(split_survey_numbers(str(sf.value)))
+
+            # Filter extent facts: keep non-Patta as-is; for Patta, keep only
+            # those whose survey context matches a non-Patta survey.
+            comparable: list["Fact"] = []
+            for f in extent_facts:
+                if f.source_type not in _PATTA_STYPES:
+                    comparable.append(f)
+                elif f.context and f.context.startswith("Survey "):
+                    patta_sn = f.context[len("Survey "):]
+                    for nps in non_patta_surveys:
+                        m_ok, _ = survey_numbers_match(patta_sn, nps)
+                        if m_ok:
+                            comparable.append(f)
                             break
-                    if conflict_found:
-                        self.conflicts.append(Conflict(
-                            category="property",
-                            key="extent",
-                            facts=ext_facts_list,
-                            severity="WARNING",
-                            description=(
-                                f"Property extent differs across documents: "
-                                f"{', '.join(f'{f.source_file}={f.value}' for f in ext_facts_list)}"
-                            ),
-                        ))
-                else:
-                    # Fallback to string comparison when units can't be parsed
-                    values = {str(f.value).strip().lower() for f in ext_facts_list}
-                    if len(values) > 1:
-                        self.conflicts.append(Conflict(
-                            category="property",
-                            key="extent",
-                            facts=ext_facts_list,
-                            severity="WARNING",
-                            description=(
-                                f"Property extent differs across documents: "
-                                f"{', '.join(f'{f.source_file}={f.value}' for f in ext_facts_list)}"
-                            ),
-                        ))
+                # Patta extent w/o survey context → skip (old aggregate)
+
+            if len(comparable) >= 2:
+                by_source_ext: dict[str, "Fact"] = {}
+                for f in comparable:
+                    by_source_ext.setdefault(f.source_file, f)
+                if len(by_source_ext) >= 2:
+                    ext_facts_list = list(by_source_ext.values())
+                    # Try numeric comparison via parse_area_to_sqft
+                    sqft_values: list[tuple["Fact", float | None]] = []
+                    for f in ext_facts_list:
+                        sqft_values.append((f, parse_area_to_sqft(str(f.value))))
+
+                    parsed = [(f, v) for f, v in sqft_values if v is not None and v > 0]
+                    if len(parsed) >= 2:
+                        # All parseable — compare numerically with 10% tolerance
+                        ref_fact, ref_sqft = parsed[0]
+                        conflict_found = False
+                        for other_fact, other_sqft in parsed[1:]:
+                            diff_ratio = abs(ref_sqft - other_sqft) / max(ref_sqft, other_sqft)
+                            if diff_ratio > 0.10:  # >10% difference
+                                conflict_found = True
+                                break
+                        if conflict_found:
+                            self.conflicts.append(Conflict(
+                                category="property",
+                                key="extent",
+                                facts=ext_facts_list,
+                                severity="WARNING",
+                                description=(
+                                    f"Property extent differs across documents: "
+                                    f"{', '.join(f'{f.source_file}={f.value}' for f in ext_facts_list)}"
+                                ),
+                            ))
+                    else:
+                        # Fallback to string comparison when units can't be parsed
+                        values = {str(f.value).strip().lower() for f in ext_facts_list}
+                        if len(values) > 1:
+                            self.conflicts.append(Conflict(
+                                category="property",
+                                key="extent",
+                                facts=ext_facts_list,
+                                severity="WARNING",
+                                description=(
+                                    f"Property extent differs across documents: "
+                                    f"{', '.join(f'{f.source_file}={f.value}' for f in ext_facts_list)}"
+                                ),
+                            ))
 
         # --- Village consistency (fuzzy) ---
         village_facts = groups.get(("property", "village"), [])
@@ -558,6 +676,31 @@ class MemoryBank:
                                     f"Village differs across documents: "
                                     f"{src_a}={fact_a.value} vs {src_b}={fact_b.value}"
                                     + (" (cross-script comparison — may be transliteration variant)" if cross_script else "")
+                                ),
+                            ))
+
+        # --- Taluk consistency (fuzzy) ---
+        taluk_facts = groups.get(("property", "taluk"), [])
+        if len(taluk_facts) >= 2:
+            by_source_taluk: dict[str, "Fact"] = {}
+            for f in taluk_facts:
+                by_source_taluk.setdefault(f.source_file, f)
+            if len(by_source_taluk) >= 2:
+                src_list = list(by_source_taluk.items())
+                for i, (src_a, fact_a) in enumerate(src_list):
+                    for src_b, fact_b in src_list[i + 1:]:
+                        matched, _ = village_names_match(
+                            str(fact_a.value), str(fact_b.value)
+                        )
+                        if not matched:
+                            self.conflicts.append(Conflict(
+                                category="property",
+                                key="taluk",
+                                facts=[fact_a, fact_b],
+                                severity="MEDIUM",
+                                description=(
+                                    f"Taluk differs across documents: "
+                                    f"{src_a}={fact_a.value} vs {src_b}={fact_b.value}"
                                 ),
                             ))
 
@@ -708,6 +851,7 @@ class MemoryBank:
                 source_type=fd["source_type"],
                 confidence=fd.get("confidence", 1.0),
                 context=fd.get("context", ""),
+                transaction_id=fd.get("transaction_id", ""),
             ))
         # Conflicts are re-detected, not restored
         return bank

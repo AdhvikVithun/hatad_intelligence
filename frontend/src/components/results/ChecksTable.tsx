@@ -13,6 +13,7 @@ export function ChecksTable({ checks }: Props) {
   const withWarnings = checks.filter(c => c.guardrail_warnings && c.guardrail_warnings.length > 0);
   const gtVerified = checks.filter(c => c.ground_truth?.verified);
   const gtMismatches = checks.filter(c => c.ground_truth?.mismatches && c.ground_truth?.mismatches?.length > 0);
+  const lowConfidence = checks.filter(c => c.data_confidence && c.data_confidence !== 'HIGH');
 
   return (
     <div className="checks-view">
@@ -32,6 +33,9 @@ export function ChecksTable({ checks }: Props) {
           <span className="checks-strip__item checks-strip__item--blue">Ground-truth checked: {gtVerified.length}</span>
           {gtMismatches.length > 0 && (
             <span className="checks-strip__item checks-strip__item--red">Mismatches: {gtMismatches.length}</span>
+          )}
+          {lowConfidence.length > 0 && (
+            <span className="checks-strip__item checks-strip__item--amber">Low Data Confidence: {lowConfidence.length}</span>
           )}
         </div>
       )}
@@ -56,6 +60,12 @@ export function ChecksTable({ checks }: Props) {
                   )}
                   {check.unreliable && (
                     <div className="checks-unreliable-label">UNRELIABLE</div>
+                  )}
+                  {check.data_confidence && check.data_confidence !== 'HIGH' && (
+                    <div className={`checks-confidence-label checks-confidence-label--${check.data_confidence.toLowerCase().replace('_', '-')}`}
+                      title={`Data confidence: ${check.data_confidence_score != null ? (check.data_confidence_score * 100).toFixed(0) + '%' : check.data_confidence}`}>
+                      {check.data_confidence === 'VERY_LOW' ? 'VERY LOW DATA' : `${check.data_confidence} DATA`}
+                    </div>
                   )}
                 </td>
                 <td><SeverityBadge severity={check.severity} size="sm" /></td>

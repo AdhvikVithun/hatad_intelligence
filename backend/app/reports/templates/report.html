@@ -1,442 +1,902 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <title>HATAD Land Intelligence Report - {{ session_id }}</title>
-    <style>
-        @page {
-            size: A4;
-            margin: 1.5cm;
-        }
-        
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
-        body {
-            font-family: 'Segoe UI', Arial, sans-serif;
-            color: #1a1a2e;
-            line-height: 1.6;
-            font-size: 11px;
-        }
-        
-        .cover {
-            text-align: center;
-            padding: 60px 40px;
-            background: linear-gradient(135deg, #0a0a1a 0%, #1a1a3e 100%);
-            color: white;
-            page-break-after: always;
-            min-height: 90vh;
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-        }
-        
-        .cover h1 {
-            font-size: 32px;
-            letter-spacing: 4px;
-            margin-bottom: 10px;
-            color: #00ff88;
-        }
-        
-        .cover .subtitle {
-            font-size: 16px;
-            color: #aab;
-            margin-bottom: 60px;
-        }
-        
-        .cover .report-title {
-            font-size: 24px;
-            margin-bottom: 20px;
-        }
-        
-        .cover .meta {
-            font-size: 12px;
-            color: #889;
-            margin-top: 40px;
-        }
-        
-        .risk-badge-cover {
-            display: inline-block;
-            padding: 20px 50px;
-            border-radius: 8px;
-            font-size: 48px;
-            font-weight: bold;
-            margin: 30px 0;
-            border: 3px solid {{ risk_color }};
-            color: {{ risk_color }};
-        }
-        
-        .risk-label-cover {
-            font-size: 18px;
-            color: {{ risk_color }};
-            text-transform: uppercase;
-            letter-spacing: 3px;
-        }
-        
-        .section {
-            margin-bottom: 20px;
-        }
-        
-        .section-header {
-            background: #1a1a2e;
-            color: white;
-            padding: 8px 15px;
-            font-size: 14px;
-            font-weight: bold;
-            letter-spacing: 1px;
-            margin-bottom: 10px;
-        }
-        
-        .subsection {
-            margin: 10px 0;
-            padding: 10px 15px;
-            background: #f8f9fa;
-            border-left: 3px solid #1a1a2e;
-        }
-        
-        .summary-box {
-            padding: 15px;
-            background: #f0f7ff;
-            border: 1px solid #cce0ff;
-            border-radius: 4px;
-            margin-bottom: 15px;
-        }
-        
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            margin: 10px 0;
-            font-size: 10px;
-        }
-        
-        th {
-            background: #1a1a2e;
-            color: white;
-            padding: 6px 8px;
-            text-align: left;
-            font-weight: 600;
-        }
-        
-        td {
-            padding: 5px 8px;
-            border-bottom: 1px solid #e0e0e0;
-        }
-        
-        tr:nth-child(even) {
-            background: #f8f9fa;
-        }
-        
-        .status-pass {
-            color: #00aa55;
-            font-weight: bold;
-        }
-        
-        .status-fail {
-            color: #ff0033;
-            font-weight: bold;
-        }
-        
-        .status-warning {
-            color: #ff8800;
-            font-weight: bold;
-        }
-        
-        .status-na {
-            color: #888;
-        }
-        
-        .severity-critical {
-            background: #fff0f0;
-            border-left: 4px solid #ff0033;
-        }
-        
-        .severity-high {
-            background: #fff8f0;
-            border-left: 4px solid #ff8800;
-        }
-        
-        .severity-medium {
-            background: #f0f8ff;
-            border-left: 4px solid #0066cc;
-        }
-        
-        .check-card {
-            padding: 10px 15px;
-            margin: 8px 0;
-            border-radius: 4px;
-        }
-        
-        .check-header {
-            font-weight: bold;
-            font-size: 11px;
-            margin-bottom: 4px;
-        }
-        
-        .check-explanation {
-            font-size: 10px;
-            color: #444;
-            margin-bottom: 4px;
-        }
-        
-        .check-recommendation {
-            font-size: 10px;
-            color: #0066cc;
-            font-style: italic;
-        }
-        
-        .red-flag {
-            padding: 8px 12px;
-            background: #fff0f0;
-            border-left: 4px solid #ff0033;
-            margin: 5px 0;
-            font-size: 11px;
-        }
-        
-        .recommendation {
-            padding: 8px 12px;
-            background: #f0fff0;
-            border-left: 4px solid #00aa55;
-            margin: 5px 0;
-            font-size: 11px;
-        }
-        
-        .stats-grid {
-            display: flex;
-            gap: 15px;
-            margin: 10px 0;
-        }
-        
-        .stat-box {
-            flex: 1;
-            text-align: center;
-            padding: 10px;
-            border-radius: 4px;
-            background: #f8f9fa;
-        }
-        
-        .stat-number {
-            font-size: 24px;
-            font-weight: bold;
-        }
-        
-        .stat-label {
-            font-size: 9px;
-            text-transform: uppercase;
-            color: #666;
-        }
-        
-        .narrative {
-            white-space: pre-wrap;
-            font-size: 10px;
-            line-height: 1.8;
-            padding: 15px;
-            background: #fafafa;
-            border: 1px solid #e0e0e0;
-        }
-        
-        .footer {
-            margin-top: 30px;
-            padding: 15px;
-            background: #f0f0f0;
-            font-size: 9px;
-            color: #666;
-            text-align: center;
-        }
-        
-        .page-break {
-            page-break-before: always;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HataD -- PCR-{{ session_id[:8] | upper }} -- Plot Clearance Report</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=JetBrains+Mono:wght@300;400;500&family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;1,300&display=swap" rel="stylesheet">
+
+<style>
+/* ===================================================
+   SWISS PRECISION -- HATAD PLOT CLEARANCE REPORT
+   Design language: Muller-Brockmann grid system
+   Accent: #BF1C2E (Swiss crimson)
+   Typography: Syne (display) + DM Sans (body) + JetBrains Mono (data)
+   Grid: 8px base unit · 52px margins · strict column alignment
+   Layout: Flowing multi-page -- Chromium auto-paginates
+=================================================== */
+
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --crimson:   #BF1C2E;
+  --crimson-d: #8C1220;
+  --risk-color: {{ risk_color }};
+  --ink:       #0D0D0D;
+  --ink-50:    #808080;
+  --ink-20:    #CCCCCC;
+  --ink-08:    #EBEBEB;
+  --ink-04:    #F5F5F5;
+  --white:     #FFFFFF;
+
+  --pass:      #1A5C32;
+  --pass-bg:   #EDF5F0;
+  --warn:      #8A4A00;
+  --warn-bg:   #FFF6E6;
+  --fail:      #991B1B;
+  --fail-bg:   #FEF2F2;
+
+  --t-2xs: 7.5px;
+  --t-xs:  9px;
+  --t-sm:  10.5px;
+  --t-md:  12px;
+  --t-base:13.5px;
+  --t-lg:  16px;
+  --t-xl:  20px;
+  --t-2xl: 28px;
+  --t-3xl: 40px;
+  --t-4xl: 56px;
+
+  --u: 8px;
+  --mg: 52px;
+  --pw: 794px;
+}
+
+body {
+  background: #1a1a1a;
+  padding: 48px 20px 80px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+  font-family: 'DM Sans', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+@page { size: A4; margin: 0; }
+@media print {
+  body { background: #fff; padding: 0; gap: 0; }
+}
+
+/* --- DOCUMENT SHELL --- */
+.doc {
+  width: var(--pw);
+  background: var(--white);
+  position: relative;
+  box-shadow: 0 0 0 1px rgba(255,255,255,0.06), 0 2px 8px rgba(0,0,0,0.3), 0 16px 64px rgba(0,0,0,0.5);
+}
+
+/* ======================================
+   MASTHEAD
+====================================== */
+.mh-crimson-bar { height: 4px; background: var(--crimson); }
+
+.mh-main {
+  padding: 20px var(--mg) 16px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: end;
+  gap: 0;
+  border-bottom: 1px solid var(--ink-08);
+}
+
+.mh-wordmark {
+  font-family: 'Syne', 'Segoe UI', 'Helvetica Neue', sans-serif;
+  font-size: var(--t-4xl);
+  font-weight: 800;
+  color: var(--ink);
+  letter-spacing: -0.025em;
+  line-height: 1;
+  margin-bottom: 8px;
+}
+
+.mh-brand-row { display: flex; align-items: center; gap: 12px; }
+.mh-brand-dot { width: 4px; height: 4px; border-radius: 50%; background: var(--crimson); flex-shrink: 0; }
+.mh-brand-sub { font-size: var(--t-2xs); letter-spacing: 0.22em; text-transform: uppercase; color: var(--ink-50); font-weight: 500; }
+.mh-brand-cin { font-family: 'JetBrains Mono', 'Cascadia Mono', 'Consolas', monospace; font-size: var(--t-2xs); color: var(--ink-20); letter-spacing: 0.06em; margin-left: 16px; }
+
+.mh-right { text-align: right; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+.mh-doc-type { font-family: 'Syne', 'Segoe UI', 'Helvetica Neue', sans-serif; font-size: var(--t-xl); font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink); }
+.mh-doc-id { font-family: 'JetBrains Mono', 'Cascadia Mono', 'Consolas', monospace; font-size: var(--t-2xs); color: var(--ink-50); letter-spacing: 0.1em; }
+.mh-conf-tag { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--ink-08); padding: 3px 10px; }
+.mh-conf-tag-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--crimson); flex-shrink: 0; }
+.mh-conf-tag-text { font-family: 'JetBrains Mono', 'Cascadia Mono', 'Consolas', monospace; font-size: var(--t-2xs); letter-spacing: 0.2em; text-transform: uppercase; color: var(--ink-50); }
+
+/* Client strip */
+.mh-client-strip {
+  padding: 8px var(--mg);
+  background: var(--ink-04);
+  border-bottom: 1px solid var(--ink-08);
+  display: grid;
+  grid-template-columns: 1fr 1px 1fr 1px 1fr;
+  gap: 0;
+  align-items: center;
+}
+.mh-strip-div { background: var(--ink-08); align-self: stretch; margin: 0 28px; }
+.mh-strip-item.c { text-align: center; }
+.mh-strip-item.r { text-align: right; }
+.mh-sl { font-size: var(--t-2xs); letter-spacing: 0.2em; text-transform: uppercase; color: var(--ink-50); font-weight: 500; margin-bottom: 3px; }
+.mh-sv { font-family: 'Syne', 'Segoe UI', 'Helvetica Neue', sans-serif; font-size: var(--t-md); font-weight: 600; color: var(--ink); letter-spacing: 0.01em; }
+.mh-sm { font-family: 'JetBrains Mono', 'Cascadia Mono', 'Consolas', monospace; font-size: var(--t-xs); color: var(--ink-50); letter-spacing: 0.06em; }
+
+/* ======================================
+   SCORE BAND
+====================================== */
+.score-band {
+  background: var(--risk-color);
+  padding: 0 var(--mg);
+}
+
+/* -- Top row: score + verdict + flags -- */
+.sb-top {
+  display: flex;
+  align-items: baseline;
+  padding: 16px 0 12px;
+  border-bottom: 1px solid rgba(255,255,255,0.10);
+}
+.sb-score-group { display: flex; align-items: baseline; gap: 6px; }
+.sb-num { font-family: 'Syne', 'Segoe UI', 'Helvetica Neue', sans-serif; font-size: 36px; font-weight: 800; color: var(--white); letter-spacing: -0.03em; line-height: 1; }
+.sb-denom { font-family: 'JetBrains Mono', 'Cascadia Mono', 'Consolas', monospace; font-size: var(--t-2xs); color: rgba(255,255,255,0.35); letter-spacing: 0.08em; }
+.sb-sep { width: 1px; align-self: stretch; background: rgba(255,255,255,0.15); margin: 0 14px; flex-shrink: 0; }
+.sb-verdict { font-family: 'Syne', 'Segoe UI', 'Helvetica Neue', sans-serif; font-size: var(--t-sm); font-weight: 700; color: var(--white); letter-spacing: 0.14em; text-transform: uppercase; white-space: nowrap; }
+.sb-flags { display: flex; gap: 6px; margin-left: auto; flex-shrink: 0; }
+.sb-flag { font-family: 'JetBrains Mono', 'Cascadia Mono', 'Consolas', monospace; font-size: var(--t-2xs); letter-spacing: 0.06em; padding: 2px 8px; border: 1px solid rgba(255,255,255,0.20); color: rgba(255,255,255,0.55); white-space: nowrap; }
+.sb-flag.hi { background: rgba(255,255,255,0.10); border-color: rgba(255,255,255,0.40); color: #fff; }
+
+/* -- Bottom row: summary only (full width) -- */
+.sb-bottom {
+  padding: 10px 0 14px;
+}
+.sb-summary-text { font-size: var(--t-xs); color: rgba(255,255,255,0.50); line-height: 1.55; font-weight: 300; font-style: italic; }
+
+/* ======================================
+   BODY (flowing content area)
+====================================== */
+.body {
+  padding: 20px var(--mg) 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+/* Section header */
+.sh { display: flex; align-items: center; gap: 14px; margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid var(--ink-08); }
+.sh-num { font-family: 'JetBrains Mono', 'Cascadia Mono', 'Consolas', monospace; font-size: var(--t-2xs); color: var(--crimson); letter-spacing: 0.2em; flex-shrink: 0; }
+.sh-title { font-family: 'Syne', 'Segoe UI', 'Helvetica Neue', sans-serif; font-size: var(--t-2xs); font-weight: 700; letter-spacing: 0.24em; text-transform: uppercase; color: var(--ink); flex-shrink: 0; }
+.sh-fill { flex: 1; }
+.sh-count { font-family: 'JetBrains Mono', 'Cascadia Mono', 'Consolas', monospace; font-size: var(--t-2xs); color: var(--ink-20); letter-spacing: 0.1em; }
+
+/* --- PROPERTY GRID --- */
+.prop-grid { display: grid; grid-template-columns: repeat(4, 1fr); border: 1px solid var(--ink-08); page-break-inside: avoid; }
+.prop-cell { padding: 9px 14px; border-right: 1px solid var(--ink-08); border-bottom: 1px solid var(--ink-08); position: relative; }
+.prop-cell:nth-child(4n) { border-right: none; }
+.prop-cell:nth-last-child(-n+4) { border-bottom: none; }
+.prop-cell:nth-child(4n+1)::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background: var(--crimson); }
+
+.pk { font-family: 'JetBrains Mono', 'Cascadia Mono', 'Consolas', monospace; font-size: var(--t-2xs); letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink-20); margin-bottom: 3px; font-weight: 400; }
+.pv { font-family: 'Syne', 'Segoe UI', 'Helvetica Neue', sans-serif; font-size: var(--t-sm); font-weight: 600; color: var(--ink); line-height: 1.3; }
+.pv.mono { font-family: 'JetBrains Mono', 'Cascadia Mono', 'Consolas', monospace; font-size: var(--t-sm); font-weight: 400; color: var(--ink); }
+.pv.red { color: var(--crimson); }
+.pv-sub { display: block; font-family: 'DM Sans', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif; font-size: var(--t-2xs); color: var(--ink-50); font-weight: 300; margin-top: 2px; }
+
+/* --- DOCUMENTS ANALYSED TABLE --- */
+.docs-tbl { width: 100%; border-collapse: collapse; font-size: var(--t-sm); border: 1px solid var(--ink-08); page-break-inside: avoid; }
+.docs-tbl thead { background: var(--ink-04); }
+.docs-tbl thead th { padding: 6px 12px; text-align: left; font-family: 'JetBrains Mono', 'Cascadia Mono', 'Consolas', monospace; font-size: var(--t-2xs); letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-50); font-weight: 500; }
+.docs-tbl tbody tr { border-bottom: 1px solid var(--ink-08); }
+.docs-tbl tbody tr:nth-child(even) { background: var(--ink-04); }
+.docs-tbl tbody td { padding: 6px 12px; color: var(--ink); vertical-align: middle; font-size: var(--t-xs); }
+.docs-tbl .mono { font-family: 'JetBrains Mono', 'Cascadia Mono', 'Consolas', monospace; font-size: var(--t-xs); color: var(--ink-50); }
+
+/* --- MISSING DOCUMENTS CALLOUT --- */
+.missing-docs {
+  background: var(--warn-bg);
+  border: 1px solid #F0D090;
+  border-left: 3px solid var(--warn);
+  padding: 12px 16px;
+  page-break-inside: avoid;
+}
+.missing-docs-head {
+  font-family: 'Syne', 'Segoe UI', 'Helvetica Neue', sans-serif;
+  font-size: var(--t-sm);
+  font-weight: 700;
+  color: var(--warn);
+  margin-bottom: 6px;
+  letter-spacing: 0.02em;
+}
+.missing-docs-list {
+  list-style: none;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+}
+.missing-docs-list li {
+  font-size: var(--t-xs);
+  color: var(--ink);
+  font-weight: 400;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.missing-docs-list li::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--warn);
+  flex-shrink: 0;
+}
+
+/* --- CHECKS --- */
+.checks-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+.ck { display: grid; grid-template-columns: 20px 1fr; gap: 8px; align-items: start; padding: 7px 10px; border: 1px solid var(--ink-08); background: var(--white); position: relative; page-break-inside: avoid; }
+.ck.pass { border-left: 2px solid var(--pass); }
+.ck.warn { border-left: 2px solid var(--warn); }
+.ck.fail { border-left: 2px solid var(--fail); }
+.ck-icon { width: 18px; height: 18px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 8px; font-weight: 700; flex-shrink: 0; margin-top: 1px; }
+.ck-icon.pass { background: var(--pass-bg); color: var(--pass); }
+.ck-icon.warn { background: var(--warn-bg); color: var(--warn); }
+.ck-icon.fail { background: var(--fail-bg); color: var(--fail); }
+.ck-icon.na   { background: var(--ink-04); color: var(--ink-50); }
+.ck-title { font-family: 'Syne', 'Segoe UI', 'Helvetica Neue', sans-serif; font-size: var(--t-xs); font-weight: 700; color: var(--ink); margin-bottom: 2px; letter-spacing: 0.01em; }
+.ck-desc { font-size: var(--t-2xs); color: var(--ink-50); line-height: 1.45; font-weight: 300; }
+
+/* --- EC TABLE --- */
+.tbl-wrap { border: 1px solid var(--ink-08); overflow: hidden; page-break-inside: avoid; }
+.ec-tbl { width: 100%; border-collapse: collapse; font-size: var(--t-sm); }
+.ec-tbl thead { background: var(--ink); }
+.ec-tbl thead th { padding: 6px 10px; text-align: left; font-family: 'JetBrains Mono', 'Cascadia Mono', 'Consolas', monospace; font-size: var(--t-2xs); letter-spacing: 0.16em; text-transform: uppercase; color: rgba(255,255,255,0.38); font-weight: 400; }
+.ec-tbl thead th:first-child { padding-left: 12px; }
+.ec-tbl tbody tr { border-bottom: 1px solid var(--ink-08); page-break-inside: avoid; }
+.ec-tbl tbody tr:nth-child(even) { background: var(--ink-04); }
+.ec-tbl tbody td { padding: 6px 10px; color: var(--ink); vertical-align: middle; font-size: var(--t-xs); }
+.ec-tbl tbody td:first-child { padding-left: 12px; font-family: 'JetBrains Mono', 'Cascadia Mono', 'Consolas', monospace; font-size: var(--t-2xs); color: var(--ink-20); }
+.ec-tbl .mono { font-family: 'JetBrains Mono', 'Cascadia Mono', 'Consolas', monospace; font-size: var(--t-xs); color: var(--ink-50); }
+
+/* Badges */
+.badge { display: inline-block; padding: 2px 7px; font-family: 'JetBrains Mono', 'Cascadia Mono', 'Consolas', monospace; font-size: var(--t-2xs); letter-spacing: 0.1em; text-transform: uppercase; font-weight: 400; }
+.badge.sale     { background: #FFF0F2; color: var(--crimson); border: 1px solid #F5C0C8; }
+.badge.mortgage { background: var(--warn-bg); color: var(--warn); border: 1px solid #F0D090; }
+.badge.release  { background: var(--pass-bg); color: var(--pass); border: 1px solid #A8D8B0; }
+.badge.gift     { background: #F2EEF8; color: #4A1880; border: 1px solid #D0B8F0; }
+.badge.other    { background: var(--ink-04); color: var(--ink-50); border: 1px solid var(--ink-08); }
+
+.status-ok { display: inline-flex; align-items: center; gap: 5px; font-size: var(--t-xs); color: var(--ink-50); }
+.status-ok::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: var(--pass); flex-shrink: 0; }
+
+/* =======================================
+   FLAG CARDS
+======================================= */
+.flag-card { border: 1px solid var(--ink-08); padding: 14px 18px 14px 20px; display: grid; grid-template-columns: 22px 1fr; gap: 14px; margin-bottom: 8px; position: relative; page-break-inside: avoid; }
+.flag-card::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; }
+.flag-card.amber::before { background: var(--warn); }
+.flag-card.red::before   { background: var(--fail); }
+.flag-card.green::before { background: var(--pass); }
+.flag-ico { font-size: 14px; padding-top: 2px; flex-shrink: 0; }
+.flag-title { font-family: 'Syne', 'Segoe UI', 'Helvetica Neue', sans-serif; font-size: var(--t-sm); font-weight: 700; color: var(--ink); margin-bottom: 6px; letter-spacing: 0.01em; line-height: 1.3; }
+.flag-body { font-size: var(--t-xs); color: var(--ink-50); line-height: 1.65; font-weight: 300; }
+.flag-action { margin-top: 8px; padding: 7px 11px; background: var(--ink-04); border-left: 2px solid var(--ink); font-size: var(--t-xs); color: var(--ink); font-weight: 500; line-height: 1.5; }
+
+/* --- Party table --- */
+.party-tbl-wrap { border: 1px solid var(--ink-08); overflow: hidden; page-break-inside: avoid; }
+.party-tbl { width: 100%; border-collapse: collapse; }
+.party-tbl thead { background: var(--ink-04); border-bottom: 2px solid var(--ink-08); }
+.party-tbl thead th { padding: 9px 13px; text-align: left; font-family: 'JetBrains Mono', 'Cascadia Mono', 'Consolas', monospace; font-size: var(--t-2xs); letter-spacing: 0.18em; text-transform: uppercase; color: var(--ink-50); font-weight: 500; }
+.party-tbl tbody tr { border-bottom: 1px solid var(--ink-08); }
+.party-tbl tbody tr:last-child { border-bottom: none; }
+.party-tbl tbody tr:nth-child(even) { background: var(--ink-04); }
+.party-tbl tbody td { padding: 11px 13px; vertical-align: top; }
+.pt-name { font-family: 'Syne', 'Segoe UI', 'Helvetica Neue', sans-serif; font-size: var(--t-md); font-weight: 700; color: var(--ink); margin-bottom: 3px; }
+.pt-role { font-size: var(--t-2xs); color: var(--ink-50); font-weight: 300; }
+.pt-variants { font-family: 'JetBrains Mono', 'Cascadia Mono', 'Consolas', monospace; font-size: var(--t-2xs); color: var(--ink-20); line-height: 1.9; letter-spacing: 0.03em; }
+
+/* --- Sale Deed section --- */
+.sd-tbl { width: 100%; border-collapse: collapse; font-size: var(--t-sm); border: 1px solid var(--ink-08); page-break-inside: avoid; }
+.sd-tbl thead { background: var(--ink-04); }
+.sd-tbl thead th { padding: 8px 12px; text-align: left; font-family: 'JetBrains Mono', 'Cascadia Mono', 'Consolas', monospace; font-size: var(--t-2xs); letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-50); font-weight: 500; }
+.sd-tbl tbody tr { border-bottom: 1px solid var(--ink-08); page-break-inside: avoid; }
+.sd-tbl tbody tr:nth-child(even) { background: var(--ink-04); }
+.sd-tbl tbody td { padding: 8px 12px; color: var(--ink); vertical-align: top; }
+.sd-key { font-family: 'JetBrains Mono', 'Cascadia Mono', 'Consolas', monospace; font-size: var(--t-2xs); letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-20); font-weight: 400; width: 22%; }
+.sd-val { font-size: var(--t-sm); color: var(--ink); }
+.sd-val.mono { font-family: 'JetBrains Mono', 'Cascadia Mono', 'Consolas', monospace; font-size: var(--t-xs); }
+
+.sd-parties { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 10px; page-break-inside: avoid; }
+.sd-party-tbl { width: 100%; border-collapse: collapse; border: 1px solid var(--ink-08); }
+.sd-party-tbl thead th { padding: 6px 10px; text-align: left; font-size: var(--t-2xs); letter-spacing: 0.14em; text-transform: uppercase; font-weight: 600; }
+.sd-party-tbl thead.seller th { background: #FFF0F2; color: var(--crimson); }
+.sd-party-tbl thead.buyer th  { background: var(--pass-bg); color: var(--pass); }
+.sd-party-tbl thead.witness th { background: var(--ink-04); color: var(--ink-50); }
+.sd-party-tbl tbody td { padding: 6px 10px; border-bottom: 1px solid var(--ink-08); font-size: var(--t-sm); }
+
+.sd-schedule { font-size: var(--t-sm); line-height: 1.6; color: var(--ink-50); background: var(--ink-04); padding: 10px 14px; border: 1px solid var(--ink-08); margin-top: 10px; page-break-inside: avoid; }
+.sd-bounds { display: grid; grid-template-columns: repeat(4, 1fr); border: 1px solid var(--ink-08); margin-top: 8px; page-break-inside: avoid; }
+.sd-bounds > div { padding: 8px 12px; border-right: 1px solid var(--ink-08); }
+.sd-bounds > div:last-child { border-right: none; }
+
+.sd-encumbrance { margin-top: 10px; padding: 8px 14px; background: var(--pass-bg); border: 1px solid #A8D8B0; font-size: var(--t-xs); color: var(--ink-50); line-height: 1.6; page-break-inside: avoid; }
+.sd-encumbrance strong { color: var(--pass); }
+
+/* Signature block */
+.sig-block { border: 1px solid var(--ink-08); padding: 20px 22px; page-break-inside: avoid; }
+.sig-head { font-family: 'JetBrains Mono', 'Cascadia Mono', 'Consolas', monospace; font-size: var(--t-2xs); letter-spacing: 0.2em; text-transform: uppercase; color: var(--ink-20); margin-bottom: 20px; }
+.sig-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 32px; }
+.sig-line { height: 40px; border-bottom: 1px solid var(--ink); margin-bottom: 8px; position: relative; }
+.sig-line::after { content: 'Sign & seal here'; position: absolute; bottom: 7px; left: 0; font-family: 'JetBrains Mono', 'Cascadia Mono', 'Consolas', monospace; font-size: var(--t-2xs); color: var(--ink-20); letter-spacing: 0.1em; }
+.sig-role { font-family: 'Syne', 'Segoe UI', 'Helvetica Neue', sans-serif; font-size: var(--t-2xs); font-weight: 700; letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink-50); margin-bottom: 2px; }
+.sig-org { font-size: var(--t-xs); color: var(--ink-20); font-weight: 300; }
+
+/* Disclaimer */
+.disclaimer { background: var(--ink-04); border: 1px solid var(--ink-08); padding: 12px 16px; font-size: var(--t-2xs); color: var(--ink-50); line-height: 1.75; font-weight: 300; page-break-inside: avoid; }
+.disclaimer strong { color: var(--ink); font-weight: 600; }
+
+/* =======================================
+   PAGE FOOTER
+======================================= */
+.page-footer {
+  background: var(--ink);
+  padding: 10px var(--mg);
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 24px;
+  align-items: center;
+}
+.pf-brand { font-family: 'Syne', 'Segoe UI', 'Helvetica Neue', sans-serif; font-size: var(--t-lg); font-weight: 800; color: rgba(255,255,255,0.5); letter-spacing: -0.01em; }
+.pf-sub { font-size: var(--t-2xs); color: rgba(255,255,255,0.18); margin-top: 2px; letter-spacing: 0.06em; }
+.pf-legal { font-size: var(--t-2xs); color: rgba(255,255,255,0.18); line-height: 1.65; font-weight: 300; }
+.pf-right { text-align: right; }
+.pf-ref { font-family: 'JetBrains Mono', 'Cascadia Mono', 'Consolas', monospace; font-size: var(--t-2xs); color: rgba(255,255,255,0.25); letter-spacing: 0.08em; line-height: 1.7; }
+
+.note { font-size: var(--t-2xs); color: var(--ink-20); margin-top: 5px; font-style: italic; }
+</style>
 </head>
 <body>
 
-<!-- COVER PAGE -->
-<div class="cover">
-    <h1>HATAD</h1>
-    <div class="subtitle">LAND INTELLIGENCE PLATFORM</div>
-    <div class="report-title">Property Due Diligence Report</div>
-    <div class="risk-badge-cover">{{ risk_score }}</div>
-    <div class="risk-label-cover">{{ risk_label }}</div>
-    <div class="meta">
-        Session: {{ session_id }}<br>
-        Generated: {{ generated_at }}<br>
-        Documents Analyzed: {{ documents|length }}
-    </div>
-</div>
+<div class="doc">
 
-<!-- EXECUTIVE SUMMARY -->
-<div class="section">
-    <div class="section-header">EXECUTIVE SUMMARY</div>
-    <div class="summary-box">
-        {{ executive_summary }}
-    </div>
-    
-    <div class="stats-grid">
-        <div class="stat-box">
-            <div class="stat-number" style="color: {{ risk_color }}">{{ risk_score }}</div>
-            <div class="stat-label">Risk Score</div>
-        </div>
-        <div class="stat-box">
-            <div class="stat-number" style="color: #00aa55">{{ total_pass }}</div>
-            <div class="stat-label">Checks Passed</div>
-        </div>
-        <div class="stat-box">
-            <div class="stat-number" style="color: #ff0033">{{ total_fail }}</div>
-            <div class="stat-label">Checks Failed</div>
-        </div>
-        <div class="stat-box">
-            <div class="stat-number" style="color: #ff8800">{{ total_warn }}</div>
-            <div class="stat-label">Warnings</div>
-        </div>
-    </div>
-</div>
+  {# ======================== MASTHEAD ======================== #}
+  <div class="mh-crimson-bar"></div>
 
-<!-- DOCUMENTS ANALYZED -->
-<div class="section">
-    <div class="section-header">DOCUMENTS ANALYZED</div>
-    <table>
-        <tr>
-            <th>File</th>
-            <th>Type</th>
-            <th>Pages</th>
-            <th>Confidence</th>
-        </tr>
-        {% for doc in documents %}
-        <tr>
-            <td>{{ doc.filename }}</td>
-            <td>{{ doc.document_type | default('PENDING') }}</td>
-            <td>{{ doc.pages }}</td>
-            <td>{{ "%.0f%%"|format((doc.classification.confidence | default(0)) * 100) }}</td>
-        </tr>
+  <div class="mh-main">
+    <div class="mh-brand">
+      <div class="mh-wordmark">HataD</div>
+      <div class="mh-brand-row">
+        <div class="mh-brand-dot"></div>
+        <div class="mh-brand-sub">Construction Lifecycle Intelligence Platform</div>
+        <div class="mh-brand-cin">Hypse Aero Private Limited · CIN U26515TZ2025PTC036025 · KITS</div>
+      </div>
+    </div>
+    <div class="mh-right">
+      <div class="mh-conf-tag">
+        <div class="mh-conf-tag-dot"></div>
+        <div class="mh-conf-tag-text">Confidential · Client Exclusive</div>
+      </div>
+      <div class="mh-doc-type">Plot Clearance Report</div>
+      <div class="mh-doc-id">PCR-{{ session_id[:8] | upper }} &nbsp;·&nbsp; Issued {{ generated_at }}</div>
+    </div>
+  </div>
+
+  <div class="mh-client-strip">
+    <div class="mh-strip-item">
+      <div class="mh-sl">Subject Property</div>
+      <div class="mh-sv">{{ prop.village }}{% if prop.village != 'Not available' and prop.taluk != 'Not available' %}, {{ prop.taluk }}{% endif %}</div>
+    </div>
+    <div class="mh-strip-div"></div>
+    <div class="mh-strip-item c">
+      <div class="mh-sl">Survey Number(s)</div>
+      <div class="mh-sm">{{ prop.survey_numbers | join(' · ') if prop.survey_numbers else '--' }}</div>
+    </div>
+    <div class="mh-strip-div"></div>
+    <div class="mh-strip-item r">
+      <div class="mh-sl">EC Period Covered</div>
+      <div class="mh-sm">{{ prop.ec_period }}</div>
+    </div>
+  </div>
+
+  {# ======================== SCORE BAND ======================== #}
+  <div class="score-band">
+    <div class="sb-top">
+      <div class="sb-score-group">
+        <div class="sb-num">{{ risk_score }}</div>
+        <div class="sb-denom">/ 100</div>
+      </div>
+      <div class="sb-sep"></div>
+      <div class="sb-verdict">{{ risk_label }}</div>
+      <div class="sb-flags">
+        {% if total_fail == 0 %}
+        <span class="sb-flag hi">0 Blocking</span>
+        {% else %}
+        <span class="sb-flag">{{ total_fail }} Blocking</span>
+        {% endif %}
+        <span class="sb-flag">{{ total_warn }} Advisory</span>
+        <span class="sb-flag">{{ total_pass }}/{{ total_checks }} Checks</span>
+      </div>
+    </div>
+    <div class="sb-bottom">
+      <div class="sb-summary-text">{{ executive_summary | default('Analysis complete. Review individual sections below for detailed findings.', true) | truncate(400, True, '...') }}</div>
+    </div>
+  </div>
+
+  {# ======================== BODY ======================== #}
+  <div class="body">
+
+    {# ====== S01 PROPERTY IDENTIFICATION ====== #}
+    <div>
+      <div class="sh">
+        <span class="sh-num">-- 01</span>
+        <span class="sh-title">Property Identification</span>
+        <div class="sh-fill"></div>
+        <span class="sh-count">{{ documents | length }} Document{{ 's' if documents | length != 1 else '' }} Analysed</span>
+      </div>
+      <div class="prop-grid">
+        <div class="prop-cell">
+          <div class="pk">Survey Number(s)</div>
+          <div class="pv mono red">{{ prop.survey_numbers | join(' · ') if prop.survey_numbers else '--' }}</div>
+        </div>
+        <div class="prop-cell">
+          <div class="pk">Village / Taluk</div>
+          <div class="pv">{{ prop.village }}<span class="pv-sub">{{ prop.taluk }} Taluk</span></div>
+        </div>
+        <div class="prop-cell">
+          <div class="pk">District</div>
+          <div class="pv">{{ prop.district }}</div>
+        </div>
+        <div class="prop-cell">
+          <div class="pk">Sub-Registrar Office</div>
+          <div class="pv">{{ prop.sro }}</div>
+        </div>
+        <div class="prop-cell">
+          <div class="pk">Patta Number</div>
+          <div class="pv mono red">{{ prop.patta_number }}</div>
+        </div>
+        <div class="prop-cell">
+          <div class="pk">Extent</div>
+          <div class="pv mono">{{ prop.extent }}</div>
+        </div>
+        <div class="prop-cell">
+          <div class="pk">EC Period</div>
+          <div class="pv mono">{{ prop.ec_period }}</div>
+        </div>
+        <div class="prop-cell">
+          <div class="pk">Land Classification</div>
+          <div class="pv">{{ prop.land_classification }}</div>
+        </div>
+        {% if prop.owners %}
+        <div class="prop-cell">
+          <div class="pk">Current Owner(s)</div>
+          <div class="pv">{% for o in prop.owners[:3] %}{{ o.name if o is mapping else o }}{% if not loop.last %}, {% endif %}{% endfor %}</div>
+        </div>
+        {% endif %}
+        {% if prop.consideration_amount != 'Not available' %}
+        <div class="prop-cell">
+          <div class="pk">Consideration</div>
+          <div class="pv mono">{{ prop.consideration_amount }}</div>
+        </div>
+        {% endif %}
+        {% if prop.property_type != 'Not available' %}
+        <div class="prop-cell">
+          <div class="pk">Property Type</div>
+          <div class="pv">{{ prop.property_type }}</div>
+        </div>
+        {% endif %}
+      </div>
+
+      {# Documents Analysed table #}
+      {% if documents %}
+      <table class="docs-tbl" style="margin-top:10px;">
+        <thead>
+          <tr>
+            <th style="width:5%">#</th>
+            <th>Filename</th>
+            <th>Document Type</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for doc in documents %}
+          <tr>
+            <td class="mono">{{ loop.index }}</td>
+            <td>{{ doc.filename | default('--') }}</td>
+            <td><span class="badge other">{{ doc.classification.doc_type | default(doc.doc_type | default('--')) }}</span></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+    </div>
+
+    {# ====== S02 MISSING DOCUMENTS ====== #}
+    {% if missing_documents %}
+    <div>
+      <div class="missing-docs">
+        <div class="missing-docs-head">Missing Documents -- Not Yet Provided for Analysis</div>
+        <ul class="missing-docs-list">
+          {% for md in missing_documents %}
+          <li>{{ md }}</li>
+          {% endfor %}
+        </ul>
+      </div>
+    </div>
+    {% endif %}
+
+    {# ====== S03 VERIFICATION SUMMARY ====== #}
+    <div>
+      <div class="sh">
+        <span class="sh-num">-- {% if missing_documents %}03{% else %}02{% endif %}</span>
+        <span class="sh-title">Verification Summary</span>
+        <div class="sh-fill"></div>
+        <span class="sh-count">{{ total_pass }} Passed · {{ total_fail }} Failed · {{ total_warn }} Advisory</span>
+      </div>
+      <div class="checks-grid">
+        {% for check in all_checks %}
+        {% set st = check.status | upper %}
+        {% set cls = 'pass' if st == 'PASS' else 'fail' if st == 'FAIL' else 'warn' if st == 'WARNING' else 'na' %}
+        <div class="ck {{ cls }}">
+          <div class="ck-icon {{ cls }}">{{ 'P' if st == 'PASS' else 'F' if st == 'FAIL' else '!' if st == 'WARNING' else '--' }}</div>
+          <div class="ck-body">
+            <div class="ck-title">{{ check.rule_name | default(check.check_name, true) | default('Check', true) }}</div>
+            <div class="ck-desc">{{ check.explanation | truncate(140, True, '...') }}</div>
+          </div>
+        </div>
         {% endfor %}
-    </table>
-</div>
-
-<!-- RED FLAGS -->
-{% if red_flags %}
-<div class="section">
-    <div class="section-header">🚨 RED FLAGS</div>
-    {% for flag in red_flags %}
-    <div class="red-flag">{{ flag }}</div>
-    {% endfor %}
-</div>
-{% endif %}
-
-<!-- CRITICAL CHECKS -->
-<div class="section page-break">
-    <div class="section-header">CRITICAL CHECKS ({{ critical_checks|length }})</div>
-    {% for check in critical_checks %}
-    <div class="check-card severity-critical">
-        <div class="check-header">
-            <span class="status-{{ check.status|lower }}">{{ check.status }}</span>
-            — {{ check.rule_name }}
-        </div>
-        <div class="check-explanation">{{ check.explanation }}</div>
-        <div class="check-recommendation">→ {{ check.recommendation }}</div>
+      </div>
     </div>
-    {% endfor %}
-</div>
 
-<!-- HIGH PRIORITY CHECKS -->
-<div class="section">
-    <div class="section-header">HIGH PRIORITY CHECKS ({{ high_checks|length }})</div>
-    {% for check in high_checks %}
-    <div class="check-card severity-high">
-        <div class="check-header">
-            <span class="status-{{ check.status|lower }}">{{ check.status }}</span>
-            — {{ check.rule_name }}
-        </div>
-        <div class="check-explanation">{{ check.explanation }}</div>
-        <div class="check-recommendation">→ {{ check.recommendation }}</div>
+    {# ====== S04 CHAIN OF TITLE ====== #}
+    {% if chain_of_title %}
+    <div>
+      <div class="sh">
+        <span class="sh-num">-- {% if missing_documents %}04{% else %}03{% endif %}</span>
+        <span class="sh-title">Chain of Title -- Transaction Register</span>
+        <div class="sh-fill"></div>
+        <span class="sh-count">{{ chain_of_title | length }} Entries</span>
+      </div>
+      <div class="tbl-wrap">
+        <table class="ec-tbl">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Document No.</th>
+              <th>Registered</th>
+              <th>Nature</th>
+              <th>Executant / Claimant</th>
+              <th>Consideration</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for link in chain_of_title %}
+            {% set txn_lower = (link.transaction_type | default('other')) | lower %}
+            {% set badge_cls = 'sale' if 'sale' in txn_lower else 'mortgage' if 'mortgage' in txn_lower else 'release' if 'release' in txn_lower or 'discharge' in txn_lower else 'gift' if 'gift' in txn_lower else 'other' %}
+            <tr>
+              <td>{{ "%02d" | format(link.sequence | default(loop.index) | int) }}</td>
+              <td class="mono">{{ link.document_number | default('--') }}</td>
+              <td class="mono">{{ link.date | default('--') }}</td>
+              <td><span class="badge {{ badge_cls }}">{{ link.transaction_type | default('--') }}</span></td>
+              <td>{{ link.get('from', '--') if link is mapping else '--' }} / {{ link.get('to', '--') if link is mapping else '--' }}</td>
+              <td class="mono">{{ link.consideration | default('--') }}</td>
+              <td><span class="status-ok">{{ 'Verified' if link.valid | default(true) else 'Issue' }}</span></td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
     </div>
-    {% endfor %}
-</div>
+    {% endif %}
 
-<!-- MEDIUM CHECKS -->
-<div class="section">
-    <div class="section-header">MEDIUM PRIORITY CHECKS ({{ medium_checks|length }})</div>
-    {% for check in medium_checks %}
-    <div class="check-card severity-medium">
-        <div class="check-header">
-            <span class="status-{{ check.status|lower }}">{{ check.status }}</span>
-            — {{ check.rule_name }}
+    {# ====== S05 ADVISORY FLAGS ====== #}
+    {% if red_flags or active_encumbrances or total_fail > 0 or total_warn > 0 or recommendations %}
+    <div>
+      <div class="sh">
+        <span class="sh-num">-- {% if missing_documents %}05{% else %}04{% endif %}</span>
+        <span class="sh-title">Advisory Flags</span>
+        <div class="sh-fill"></div>
+        <span class="sh-count">{{ total_fail }} Blocking · {{ total_warn }} Advisory</span>
+      </div>
+
+      {# Red flags #}
+      {% for flag in red_flags %}
+      <div class="flag-card red">
+        <div class="flag-ico">!!</div>
+        <div class="flag-content">
+          <div class="flag-title">{{ flag }}</div>
         </div>
-        <div class="check-explanation">{{ check.explanation }}</div>
-        <div class="check-recommendation">→ {{ check.recommendation }}</div>
-    </div>
-    {% endfor %}
-</div>
+      </div>
+      {% endfor %}
 
-<!-- CHAIN OF TITLE -->
-{% if chain_of_title %}
-<div class="section page-break">
-    <div class="section-header">CHAIN OF TITLE</div>
-    <table>
-        <tr>
-            <th>#</th>
-            <th>Date</th>
-            <th>From</th>
-            <th>To</th>
-            <th>Type</th>
-            <th>Doc No</th>
-            <th>Valid</th>
-        </tr>
-        {% for link in chain_of_title %}
-        <tr>
-            <td>{{ link.sequence }}</td>
-            <td>{{ link.date }}</td>
-            <td>{{ link.from }}</td>
-            <td>{{ link.to }}</td>
-            <td>{{ link.transaction_type }}</td>
-            <td>{{ link.document_number }}</td>
-            <td class="status-{{ 'pass' if link.valid else 'fail' }}">
-                {{ '✓' if link.valid else '✗' }}
-            </td>
-        </tr>
+      {# Active encumbrances #}
+      {% for enc in active_encumbrances %}
+      <div class="flag-card amber">
+        <div class="flag-ico">!</div>
+        <div class="flag-content">
+          <div class="flag-title">{{ enc.nature | default('Active Encumbrance') }}{% if enc.document_number %} -- Doc #{{ enc.document_number }}{% endif %}</div>
+          <div class="flag-body">
+            {% if enc.parties %}Parties: {{ enc.parties }}. {% endif %}
+            {% if enc.date %}Date: {{ enc.date }}. {% endif %}
+            {% if enc.details %}{{ enc.details }}{% endif %}
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+
+      {# Failed / Warning checks as flags #}
+      {% for check in all_checks if check.status in ('FAIL', 'WARNING') %}
+      <div class="flag-card {{ 'red' if check.status == 'FAIL' else 'amber' }}">
+        <div class="flag-ico">{{ 'F' if check.status == 'FAIL' else '!' }}</div>
+        <div class="flag-content">
+          <div class="flag-title">{{ check.rule_name | default(check.check_name, true) | default('Check', true) }}</div>
+          <div class="flag-body">{{ check.explanation | truncate(400, True, '...') }}</div>
+          {% if check.recommendation %}
+          <div class="flag-action">&gt; {{ check.recommendation }}</div>
+          {% endif %}
+        </div>
+      </div>
+      {% endfor %}
+
+      {# Recommendations #}
+      {% for rec in recommendations %}
+      <div class="flag-card amber">
+        <div class="flag-ico">&gt;</div>
+        <div class="flag-content">
+          <div class="flag-body">{{ rec }}</div>
+        </div>
+      </div>
+      {% endfor %}
+
+      {# Positive summary #}
+      {% if total_pass > 0 %}
+      <div class="flag-card green">
+        <div class="flag-ico">P</div>
+        <div class="flag-content">
+          <div class="flag-title">{{ total_pass }} Verification{{ 's' if total_pass != 1 else '' }} Passed</div>
+          <div class="flag-body">These checks found no issues based on the uploaded documents.</div>
+        </div>
+      </div>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    {# ====== S06 SALE DEED DETAILS ====== #}
+    {% if sale_deed %}
+    <div>
+      <div class="sh">
+        <span class="sh-num">-- {% if missing_documents %}06{% else %}05{% endif %}</span>
+        <span class="sh-title">Sale Deed -- Transaction Details</span>
+        <div class="sh-fill"></div>
+      </div>
+
+      {# Transaction Summary #}
+      {% if sale_deed.registration or sale_deed.financials or sale_deed.payment_mode %}
+      <table class="sd-tbl">
+        <tbody>
+          <tr>
+            <td class="sd-key">Document No.</td>
+            <td class="sd-val mono">{{ sale_deed.registration.document_number | default('--', true) }}</td>
+            <td class="sd-key">Registration Date</td>
+            <td class="sd-val mono">{{ sale_deed.registration.registration_date | default('--', true) }}</td>
+          </tr>
+          <tr>
+            <td class="sd-key">Execution Date</td>
+            <td class="sd-val mono">{{ sale_deed.registration.execution_date | default('--', true) }}</td>
+            <td class="sd-key">SRO</td>
+            <td class="sd-val">{{ sale_deed.registration.sro | default('--', true) }}</td>
+          </tr>
+          <tr>
+            <td class="sd-key">Consideration</td>
+            <td class="sd-val mono">{{ sale_deed.financials.consideration_amount | default('--', true) }}</td>
+            <td class="sd-key">Guideline Value</td>
+            <td class="sd-val mono">{{ sale_deed.financials.guideline_value | default('--', true) }}</td>
+          </tr>
+          <tr>
+            <td class="sd-key">Stamp Duty</td>
+            <td class="sd-val mono">{{ sale_deed.financials.stamp_duty | default('--', true) }}</td>
+            <td class="sd-key">Registration Fee</td>
+            <td class="sd-val mono">{{ sale_deed.financials.registration_fee | default('--', true) }}</td>
+          </tr>
+          {% if sale_deed.payment_mode or sale_deed.possession_date %}
+          <tr>
+            <td class="sd-key">Payment Mode</td>
+            <td class="sd-val">{{ sale_deed.payment_mode | default('--', true) }}</td>
+            <td class="sd-key">Possession Date</td>
+            <td class="sd-val mono">{{ sale_deed.possession_date | default('--', true) }}</td>
+          </tr>
+          {% endif %}
+        </tbody>
+      </table>
+      {% endif %}
+
+      {# Sellers / Buyers #}
+      {% if sale_deed.sellers or sale_deed.buyers %}
+      <div class="sd-parties">
+        {% if sale_deed.sellers %}
+        <table class="sd-party-tbl">
+          <thead class="seller"><tr><th colspan="2">Seller(s)</th></tr></thead>
+          <tbody>
+            {% for s in sale_deed.sellers[:4] %}
+            <tr>
+              <td style="font-weight:600;">{{ s.name | default('--') }}</td>
+              <td style="font-size:var(--t-xs);color:var(--ink-50);">{% if s.relation %}{{ s.relation }}{% endif %}{% if s.age %}, Age {{ s.age }}{% endif %}{% if s.pan %}<br>PAN: {{ s.pan }}{% endif %}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% endif %}
+        {% if sale_deed.buyers %}
+        <table class="sd-party-tbl">
+          <thead class="buyer"><tr><th colspan="2">Buyer(s)</th></tr></thead>
+          <tbody>
+            {% for b in sale_deed.buyers[:4] %}
+            <tr>
+              <td style="font-weight:600;">{{ b.name | default('--') }}</td>
+              <td style="font-size:var(--t-xs);color:var(--ink-50);">{% if b.relation %}{{ b.relation }}{% endif %}{% if b.age %}, Age {{ b.age }}{% endif %}{% if b.pan %}<br>PAN: {{ b.pan }}{% endif %}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% endif %}
+      </div>
+      {% endif %}
+
+      {# Witnesses #}
+      {% if sale_deed.witnesses %}
+      <table class="sd-party-tbl" style="margin-top:10px;">
+        <thead class="witness"><tr><th>Witness Name</th><th>Address</th></tr></thead>
+        <tbody>
+          {% for w in sale_deed.witnesses %}
+          <tr>
+            <td style="font-weight:600;">{{ w.name | default(w if w is string else '--') }}</td>
+            <td style="font-size:var(--t-xs);color:var(--ink-50);">{{ w.address | default('--') }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+
+      {# Property Schedule #}
+      {% if sale_deed.property_description %}
+      <div class="sd-schedule">{{ sale_deed.property_description | truncate(500, True, '...') }}</div>
+      {% endif %}
+
+      {% if sale_deed.boundaries %}
+      <div class="sd-bounds">
+        <div><div class="pk">North</div><div style="font-size:var(--t-sm);color:var(--ink);">{{ sale_deed.boundaries.north | default('--') }}</div></div>
+        <div><div class="pk">South</div><div style="font-size:var(--t-sm);color:var(--ink);">{{ sale_deed.boundaries.south | default('--') }}</div></div>
+        <div><div class="pk">East</div><div style="font-size:var(--t-sm);color:var(--ink);">{{ sale_deed.boundaries.east | default('--') }}</div></div>
+        <div><div class="pk">West</div><div style="font-size:var(--t-sm);color:var(--ink);">{{ sale_deed.boundaries.west | default('--') }}</div></div>
+      </div>
+      {% endif %}
+
+      {# Ownership History #}
+      {% if sale_deed.ownership_history %}
+      <table class="sd-tbl" style="margin-top:10px;">
+        <thead>
+          <tr><th>#</th><th>Date</th><th>Owner</th><th>Acquired From</th><th>Mode</th><th>Document Ref</th></tr>
+        </thead>
+        <tbody>
+          {% for entry in sale_deed.ownership_history[:8] %}
+          <tr>
+            <td style="text-align:center;font-family:'JetBrains Mono',monospace;font-size:var(--t-2xs);color:var(--ink-20);">{{ loop.index }}</td>
+            <td class="mono">{{ entry.document_date | default('--') }}</td>
+            <td style="font-weight:600;">{{ entry.owner | default('--') }}</td>
+            <td>{{ entry.acquired_from | default('--') }}</td>
+            <td><span class="badge other">{{ entry.acquisition_mode | default('--') }}</span></td>
+            <td class="mono">{{ entry.document_number | default('--') }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+
+      {# Conditions #}
+      {% if sale_deed.conditions %}
+      <div class="sd-schedule" style="margin-top:10px;">
+        <strong style="color:var(--ink);font-size:var(--t-xs);letter-spacing:0.08em;text-transform:uppercase;">Conditions:</strong><br>
+        {% for cond in sale_deed.conditions %}
+        {{ loop.index }}. {{ cond }}<br>
         {% endfor %}
-    </table>
-</div>
-{% endif %}
+      </div>
+      {% endif %}
 
-<!-- RECOMMENDATIONS -->
-{% if recommendations %}
-<div class="section">
-    <div class="section-header">RECOMMENDATIONS</div>
-    {% for rec in recommendations %}
-    <div class="recommendation">{{ loop.index }}. {{ rec }}</div>
-    {% endfor %}
-</div>
-{% endif %}
+      {# Encumbrance Declaration #}
+      {% if sale_deed.encumbrance_declaration %}
+      <div class="sd-encumbrance"><strong>Encumbrance Declaration:</strong> {{ sale_deed.encumbrance_declaration | truncate(350, True, '...') }}</div>
+      {% endif %}
+    </div>
+    {% endif %}
 
-<!-- MISSING DOCUMENTS -->
-{% if missing_documents %}
-<div class="section">
-    <div class="section-header">DOCUMENTS TO OBTAIN</div>
-    {% for doc in missing_documents %}
-    <div class="recommendation">☐ {{ doc }}</div>
-    {% endfor %}
-</div>
-{% endif %}
+    {# ====== S07 OWNER & PARTY VERIFICATION ====== #}
+    {% if identity_clusters %}
+    <div>
+      <div class="sh">
+        <span class="sh-num">-- {% if missing_documents %}07{% else %}06{% endif %}</span>
+        <span class="sh-title">Owner & Party Verification</span>
+        <div class="sh-fill"></div>
+        <span class="sh-count">{{ identity_clusters | length }} Identified</span>
+      </div>
+      <div class="party-tbl-wrap">
+        <table class="party-tbl">
+          <thead>
+            <tr>
+              <th style="width:30%">Canonical Name</th>
+              <th style="width:45%">Name Variants Found in Documents</th>
+              <th style="width:10%;text-align:center">Mentions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for cluster in identity_clusters[:12] %}
+            <tr>
+              <td>
+                <div class="pt-name">{{ cluster.consensus_name }}</div>
+                <div class="pt-role">{{ cluster.variants | length if cluster.variants else 0 }} variant{{ 's' if (cluster.variants | length if cluster.variants else 0) != 1 else '' }}</div>
+              </td>
+              <td>
+                <div class="pt-variants">{{ cluster.variants | join(' · ') if cluster.variants else '--' }}</div>
+              </td>
+              <td style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--ink);text-align:center;font-weight:500;">{{ cluster.mention_count | default('--') }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% if identity_clusters | length > 12 %}
+      <div class="note">+ {{ identity_clusters | length - 12 }} additional parties omitted.</div>
+      {% endif %}
+    </div>
+    {% endif %}
 
-<!-- DETAILED NARRATIVE REPORT -->
-{% if narrative_report %}
-<div class="section page-break">
-    <div class="section-header">DETAILED NARRATIVE REPORT</div>
-    <div class="narrative">{{ narrative_report }}</div>
-</div>
-{% endif %}
+    {# ====== SIGNATURE BLOCK ====== #}
+    <div class="sig-block">
+      <div class="sig-head">Authorisation &amp; Client Acknowledgement -- Sign to confirm receipt and review of findings</div>
+      <div class="sig-grid">
+        <div class="sig-col">
+          <div class="sig-line"></div>
+          <div class="sig-role">Authorised Signatory</div>
+          <div class="sig-org">HataD / Hypse Aero Private Limited</div>
+        </div>
+        <div class="sig-col">
+          <div class="sig-line"></div>
+          <div class="sig-role">Client Representative</div>
+          <div class="sig-org">&nbsp;</div>
+        </div>
+        <div class="sig-col">
+          <div class="sig-line"></div>
+          <div class="sig-role">Legal Counsel Review</div>
+          <div class="sig-org">Advocate Name &amp; Reg. No.</div>
+        </div>
+      </div>
+    </div>
 
-<!-- FOOTER -->
-<div class="footer">
-    <strong>HATAD LAND INTELLIGENCE PLATFORM</strong><br>
-    This report is generated based on automated analysis of uploaded documents. It does not constitute legal advice.
-    Physical verification, government record verification, and consultation with a qualified lawyer are strongly recommended.
-    <br><br>
-    Session: {{ session_id }} | Generated: {{ generated_at }}
-</div>
+    {# ====== DISCLAIMER ====== #}
+    <div class="disclaimer">
+      <strong>Disclaimer --</strong> This Plot Clearance Report is produced by HataD (Hypse Aero Private Limited, CIN: U26515TZ2025PTC036025) using publicly available government data. It is a preliminary due diligence instrument and does not constitute legal advice or a guarantee of title. All findings must be independently verified by a licensed advocate prior to transaction execution. HataD accepts no liability for decisions made solely on this report.
+    </div>
+
+  </div>{# /body #}
+
+  {# ======================== FOOTER ======================== #}
+  <div class="page-footer">
+    <div>
+      <div class="pf-brand">HataD</div>
+      <div class="pf-sub">Hypse Aero Private Limited · Incubated at KITS, Coimbatore</div>
+    </div>
+    <div class="pf-legal">This report is a preliminary due diligence instrument produced by automated analysis of verified government data. All findings must be independently verified by a licensed advocate prior to transaction. HataD accepts no liability for decisions made solely on this report.</div>
+    <div class="pf-right">
+      <div class="pf-ref">PCR-{{ session_id[:8] | upper }}<br>{{ generated_at }}</div>
+    </div>
+  </div>
+
+</div>{# /doc #}
 
 </body>
 </html>
+

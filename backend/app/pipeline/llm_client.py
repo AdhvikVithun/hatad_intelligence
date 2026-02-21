@@ -8,6 +8,7 @@ Supports:
 
 import json
 import time
+import re
 import random
 import asyncio
 import httpx
@@ -27,6 +28,18 @@ VISION_TIMEOUT = 300              # Not used
 VISION_CONTEXT_WINDOW = 32768    # Not used
 
 logger = logging.getLogger(__name__)
+
+# Pre-compiled regex for repetition detection (used by _is_repetitive_output)
+# Short-token repetition (e.g. single Tamil word repeated 10+ times)
+_REPETITIVE_RE = re.compile(
+    r'(["\']?[^"\'\',;\n]{1,30}["\']?(?:\s*[,;]?\s*))\1{9,}',
+    re.UNICODE,
+)
+# Long-phrase repetition (e.g. "Survey No: 317, Scale: 1:..." repeated 4+ times)
+_LONG_REPEAT_RE = re.compile(
+    r'(.{20,80})\1{3,}',
+    re.UNICODE,
+)
 
 # Type for progress callback: async fn(stage, message, details_dict)
 LLMProgressCallback = Callable[[str, str, dict], Awaitable[None]]
@@ -59,9 +72,11 @@ def _build_finalize_hint(schema: dict | None) -> str:
         )
 
     props = schema.get("properties", {})
-    required = schema.get("required", list(props.keys()))
+    # Iterate ALL properties, not just required — important optional fields
+    # like chain_of_title must appear in the finalize hint so the LLM emits them.
+    all_keys = list(props.keys())
     parts = []
-    for key in required:
+    for key in all_keys:
         prop = props.get(key, {})
         ptype = prop.get("type", "string")
         if ptype == "array":
@@ -759,18 +774,14 @@ async def call_llm(
 def _is_repetitive_output(text: str, min_repeats: int = 10) -> bool:
     """Detect degenerate repetition-loop output from the LLM.
 
-    Returns True if a short token (≤30 chars) appears consecutively
-    *min_repeats* or more times, indicating the decoder got stuck.
+    Returns True if:
+      - A short token (≤30 chars) repeats 10+ consecutive times, OR
+      - A longer phrase (20-80 chars) repeats 4+ consecutive times.
+    Either pattern indicates the decoder got stuck in a loop.
     """
     if not text or len(text) < 50:
         return False
-    # Match any token (1-30 chars) repeated 10+ times with optional whitespace/comma/quotes
-    import re
-    pattern = re.compile(
-        r'(["\']?[^"\',;\n]{1,30}["\']?(?:\s*[,;]?\s*))\1{' + str(min_repeats - 1) + r',}',
-        re.UNICODE,
-    )
-    return bool(pattern.search(text))
+    return bool(_REPETITIVE_RE.search(text)) or bool(_LONG_REPEAT_RE.search(text))
 
 
 def _parse_json_response(text: str) -> dict:

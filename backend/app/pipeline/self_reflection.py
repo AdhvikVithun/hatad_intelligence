@@ -111,8 +111,8 @@ async def run_self_reflection(
             "rule_name": check.get("rule_name", ""),
             "severity": check.get("severity", ""),
             "status": check.get("status", ""),
-            "explanation": check.get("explanation", "")[:300],
-            "evidence": check.get("evidence", "")[:400],
+            "explanation": check.get("explanation", "")[:600],
+            "evidence": check.get("evidence", "")[:800],
         })
 
     prompt = (

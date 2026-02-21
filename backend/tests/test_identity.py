@@ -591,7 +591,7 @@ class TestDeterministicIntegration:
         assert len(warn_checks) >= 1
 
     def test_legacy_fallback_without_resolver(self):
-        """Without identity_resolver, falls back to pairwise matching."""
+        """Without identity_resolver, falls back to pairwise fuzzy matching."""
         from app.pipeline.deterministic import check_party_name_consistency
 
         data = _make_extracted_data(
@@ -603,8 +603,7 @@ class TestDeterministicIntegration:
                 "owner_names": [{"name": "Completely Different Person"}],
             },
         )
-        # No resolver → legacy path
+        # No resolver → fuzzy fallback detects buyer-patta mismatch
         checks = check_party_name_consistency(data)
-        # Should still produce a warning (legacy pairwise)
-        warn_checks = [c for c in checks if c["status"] == "WARNING"]
-        assert len(warn_checks) >= 1
+        codes = [c["rule_code"] for c in checks]
+        assert "DET_BUYER_PATTA_MISMATCH" in codes

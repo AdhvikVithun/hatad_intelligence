@@ -253,6 +253,116 @@ class TestConflictDetection:
 
 
 # ═══════════════════════════════════════════════════
+# 3b. Patta-portfolio-aware conflict detection
+# ═══════════════════════════════════════════════════
+
+class TestPattaPortfolioConflicts:
+    """Tests that multi-survey Patta (owner portfolio) doesn't cause false conflicts."""
+
+    def test_patta_per_survey_extent_stored(self):
+        """Patta ingestion stores per-survey extent facts with context."""
+        bank = MemoryBank()
+        bank.ingest_document("patta.pdf", "PATTA", {
+            "patta_number": "P-637",
+            "survey_numbers": [
+                {"survey_no": "317", "extent": "2400 sq.ft", "classification": "Dry"},
+                {"survey_no": "543", "extent": "3000 sq.ft", "classification": "Wet"},
+            ],
+            "total_extent": "5400 sq.ft",
+            "village": "Chromepet",
+        })
+        extent_facts = [f for f in bank.facts if f.key == "extent"]
+        # Should have per-survey extent facts, not aggregate
+        assert len(extent_facts) == 2
+        contexts = {f.context for f in extent_facts}
+        assert "Survey 317" in contexts
+        assert "Survey 543" in contexts
+
+    def test_patta_total_extent_separate_key(self):
+        """Patta total_extent stored as 'total_patta_extent', not 'extent'."""
+        bank = MemoryBank()
+        bank.ingest_document("patta.pdf", "PATTA", {
+            "patta_number": "P-637",
+            "survey_numbers": [
+                {"survey_no": "317", "extent": "2400 sq.ft"},
+            ],
+            "total_extent": "2400 sq.ft",
+        })
+        total_facts = [f for f in bank.facts if f.key == "total_patta_extent"]
+        assert len(total_facts) == 1
+        assert total_facts[0].value == "2400 sq.ft"
+
+    def test_no_false_extent_conflict_multi_survey_patta(self):
+        """Multi-survey Patta with matching survey extent → no extent conflict."""
+        bank = MemoryBank()
+        bank.ingest_document("deed.pdf", "SALE_DEED", {
+            "seller": [{"name": "Seller"}],
+            "buyer": [{"name": "Buyer"}],
+            "property": {"survey_number": "317", "extent": "2400 sq.ft",
+                         "village": "Chromepet"},
+        })
+        bank.ingest_document("patta.pdf", "PATTA", {
+            "patta_number": "P-637",
+            "survey_numbers": [
+                {"survey_no": "317", "extent": "2400 sq.ft"},
+                {"survey_no": "543", "extent": "10000 sq.ft"},
+            ],
+            "total_extent": "12400 sq.ft",
+            "village": "Chromepet",
+            "owner_names": [{"name": "Buyer"}],
+        })
+        conflicts = bank.detect_conflicts()
+        extent_conflicts = [c for c in conflicts if c.key == "extent"]
+        assert len(extent_conflicts) == 0
+
+    def test_genuine_extent_conflict_still_detected(self):
+        """Patta matching-survey extent differs from deed extent → conflict."""
+        bank = MemoryBank()
+        bank.ingest_document("deed.pdf", "SALE_DEED", {
+            "seller": [{"name": "Seller"}],
+            "buyer": [{"name": "Buyer"}],
+            "property": {"survey_number": "317", "extent": "2400 sq.ft",
+                         "village": "Chromepet"},
+        })
+        bank.ingest_document("patta.pdf", "PATTA", {
+            "patta_number": "P-637",
+            "survey_numbers": [
+                {"survey_no": "317", "extent": "5000 sq.ft"},
+                {"survey_no": "543", "extent": "3000 sq.ft"},
+            ],
+            "total_extent": "8000 sq.ft",
+            "village": "Chromepet",
+            "owner_names": [{"name": "Buyer"}],
+        })
+        conflicts = bank.detect_conflicts()
+        extent_conflicts = [c for c in conflicts if c.key == "extent"]
+        assert len(extent_conflicts) >= 1
+
+    def test_patta_unrelated_survey_no_extent_conflict(self):
+        """Patta surveys that don't match deed survey → filtered out, no false conflict."""
+        bank = MemoryBank()
+        bank.ingest_document("deed.pdf", "SALE_DEED", {
+            "seller": [{"name": "Seller"}],
+            "buyer": [{"name": "Buyer"}],
+            "property": {"survey_number": "317", "extent": "2400 sq.ft",
+                         "village": "Chromepet"},
+        })
+        bank.ingest_document("patta.pdf", "PATTA", {
+            "patta_number": "P-637",
+            "survey_numbers": [
+                {"survey_no": "888", "extent": "50000 sq.ft"},
+            ],
+            "total_extent": "50000 sq.ft",
+            "village": "Chromepet",
+            "owner_names": [{"name": "Buyer"}],
+        })
+        conflicts = bank.detect_conflicts()
+        extent_conflicts = [c for c in conflicts if c.key == "extent"]
+        # No extent conflict — Patta survey 888 doesn't match deed survey 317
+        assert len(extent_conflicts) == 0
+
+
+# ═══════════════════════════════════════════════════
 # 4. Query & cross-references
 # ═══════════════════════════════════════════════════
 
@@ -431,7 +541,7 @@ class TestExtentUnitAware:
             "financials": {},
         })
         bank.ingest_document("patta.pdf", "PATTA", {
-            "survey_numbers": [{"survey_no": "311/1"}],
+            "survey_numbers": [{"survey_no": "311/1", "extent": patta_extent}],
             "total_extent": patta_extent,
         })
         return bank

@@ -142,3 +142,15 @@
   font-family: var(--font-mono);
   font-weight: 600;
 }
+
+/* Data confidence labels */
+.checks-confidence-label {
+  font-size: 8px;
+  margin-top: 2px;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+.checks-confidence-label--moderate { color: #f59e0b; }
+.checks-confidence-label--low { color: #f97316; }
+.checks-confidence-label--very-low { color: #ef4444; }

@@ -29,8 +29,12 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gpt-oss:20b")
 # Kept for reference only:
 # VISION_MODEL = os.getenv("VISION_MODEL", "qwen3-vl:8b")
 
+# Concurrency
+MAX_CONCURRENT_ANALYSES = int(os.getenv("MAX_CONCURRENT_ANALYSES", "1"))  # Parallel analysis pipelines
+
 # Processing
 MAX_CHUNK_PAGES = 10  # Max pages per LLM chunk for large documents
+MAX_CHUNK_CHARS = 60000  # Hard char budget per extraction chunk (~15K tokens, fits 64K window)
 LLM_TIMEOUT = 900  # 15 min per LLM call — model may think 70K+ chars before outputting JSON
 LLM_MAX_RETRIES = 3
 LLM_CONTEXT_WINDOW = 65536  # 64K tokens — match Ollama desktop setting
@@ -53,6 +57,9 @@ RAG_CHUNK_OVERLAP = 200             # Overlap between adjacent chunks
 RAG_TOP_K = 4                       # Chunks returned per retrieval query (fewer = less noise)
 RAG_MIN_CHUNK_CHARS = 50            # Skip chunks shorter than this (noise filter)
 RAG_MAX_DISTANCE = 0.45             # Cosine distance threshold — discard chunks above this
+RAG_MMR_LAMBDA = 0.7                # MMR: balance relevance (λ) vs diversity (1-λ)
+RAG_KEYWORD_BOOST = 0.15            # Hybrid retrieval: weight for keyword overlap bonus in scoring
+RAG_PRE_INDEX = True                # Index raw OCR text before extraction (enables EC header injection)
 CHROMA_DIR = TEMP_DIR / "vectordb"  # ChromaDB persistent storage
 CHROMA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -61,9 +68,10 @@ CHROMA_DIR.mkdir(parents=True, exist_ok=True)
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "")
 SARVAM_ENABLED = bool(SARVAM_API_KEY)
 SARVAM_LANGUAGE = "ta-IN"                    # Tamil (India)
-SARVAM_POLL_INTERVAL = 3                     # Seconds between job status polls
-SARVAM_TIMEOUT = 120                         # Max seconds to wait for job completion
-SARVAM_MAX_RETRIES = 2                       # Retry timed-out jobs up to N times
+SARVAM_POLL_INTERVAL = int(os.getenv("SARVAM_POLL_INTERVAL", "3"))      # Seconds between status polls
+SARVAM_TIMEOUT = int(os.getenv("SARVAM_TIMEOUT", "120"))               # Max seconds per attempt
+SARVAM_MAX_RETRIES = int(os.getenv("SARVAM_MAX_RETRIES", "2"))         # Retry failed/timed-out jobs
+SARVAM_MAX_FILE_MB = int(os.getenv("SARVAM_MAX_FILE_MB", "40"))        # Skip files larger than this
 
 # Debug trace mode — set HATAD_TRACE=1 to get detailed deterministic engine logs
 TRACE_ENABLED = os.getenv("HATAD_TRACE", "").strip().lower() in ("1", "true", "yes")
@@ -72,6 +80,7 @@ TRACE_ENABLED = os.getenv("HATAD_TRACE", "").strip().lower() in ("1", "true", "y
 DOCUMENT_TYPES = [
     "EC",                    # Encumbrance Certificate
     "PATTA",                 # Patta / Chitta
+    "A_REGISTER",            # A-Register (அ-பதிவேடு) — village land register
     "SALE_DEED",             # Sale Deed
     "CHITTA",                # Chitta
     "ADANGAL",               # Adangal / Village Account
@@ -87,10 +96,14 @@ DOCUMENT_TYPES = [
     "OTHER",
 ]
 
+# Tamil Nadu registration rates (configurable for policy changes)
+TN_STAMP_DUTY_RATE = float(os.getenv("TN_STAMP_DUTY_RATE", "0.07"))    # 7% of property value
+TN_REGISTRATION_FEE_RATE = float(os.getenv("TN_REGISTRATION_FEE_RATE", "0.04"))  # 4% (capped at ₹4L residential)
+
 # Risk score bands
 RISK_BANDS = {
-    "LOW": {"min": 80, "max": 100, "color": "#00ff88", "label": "Low Risk"},
-    "MEDIUM": {"min": 50, "max": 79, "color": "#ffaa00", "label": "Medium Risk"},
-    "HIGH": {"min": 20, "max": 49, "color": "#ff6600", "label": "High Risk"},
-    "CRITICAL": {"min": 0, "max": 19, "color": "#ff0033", "label": "Critical Risk"},
+    "LOW": {"min": 80, "max": 100, "color": "#1A7A3A", "label": "Low Risk"},
+    "MEDIUM": {"min": 50, "max": 79, "color": "#C27A00", "label": "Medium Risk"},
+    "HIGH": {"min": 20, "max": 49, "color": "#BF4A00", "label": "High Risk"},
+    "CRITICAL": {"min": 0, "max": 19, "color": "#BF1C2E", "label": "Critical Risk"},
 }

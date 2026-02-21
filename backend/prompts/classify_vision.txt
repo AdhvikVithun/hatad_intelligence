@@ -5,6 +5,7 @@ You are shown an IMAGE of the first page(s) of a land document. Classify it into
 DOCUMENT TYPES:
 - EC: Encumbrance Certificate (சுமையின்மை சான்றிதழ்) — lists transactions/encumbrances
 - PATTA: Patta (பட்டா) — proof of land ownership from Revenue Department
+- A_REGISTER: A-Register / அ-பதிவேடு (A-Pathivedu) — village-level revenue register extract. Similar fields to Patta but title says "அ-பதிவேடு"
 - SALE_DEED: Sale Deed (விற்பனை பத்திரம்) — registered property transfer
 - CHITTA: Chitta (சிட்டா) — revenue record showing land classification
 - ADANGAL: Adangal/Village Account — village-level land & cultivation record
@@ -22,6 +23,7 @@ DOCUMENT TYPES:
 HINTS:
 - EC: tables with Date, Document Number, Nature, Parties columns; header says "Encumbrance Certificate" or "சுமையின்மை சான்றிதழ்"
 - PATTA: "பட்டா எண்" (Patta Number), owner names, survey/extent table with columns for வ.எண் (serial), புல எண் (survey no), பரப்பு (extent). Often has a government header with district/taluk/village. May show multiple survey entries in a table format.
+- A_REGISTER: Header says "அ-பதிவேடு" or "அ-பதிவேடு விவரங்கள்" — village register extract with patta numbers, survey numbers, extents, owner names. DO NOT confuse with PATTA — check the title.
 - SALE_DEED: "விற்பனை பத்திரம்", stamp paper, registration marks, SRO stamps, buyer/seller details, consideration amount, property schedule with boundaries. Usually on stamped paper with registration endorsements.
 - CHITTA: Similar to Patta — revenue record showing land classification. May show "சிட்டா" in header.
 - FMB: Sketch/diagram of land boundaries with measurements
@@ -35,12 +37,12 @@ SPATIAL LAYOUT HINTS — Use page position to aid classification:
 - Stamp paper patterns (repeating denominations, watermarks visible in background) = Sale Deed or similar registered document.
 - Government printed forms with fillable fields = Revenue records (Patta, Chitta, Adangal).
 
-CRITICAL DISAMBIGUATION — PATTA vs SALE DEED:
+CRITICAL DISAMBIGUATION — PATTA vs A_REGISTER vs SALE DEED:
 - A Patta is a REVENUE RECORD (government-issued ownership proof) — it has a tabular format with survey numbers, extents, land classification, and owner details. It does NOT have buyer/seller transaction details or consideration amounts.
+- An A-Register (அ-பதிவேடு) is a VILLAGE REGISTER EXTRACT — similar fields to Patta but its title/header says "அ-பதிவேடு" or "அ-பதிவேடு விவரங்கள்". If the header says "அ-பதிவேடு" → A_REGISTER, NOT PATTA.
 - A Sale Deed is a REGISTERED TRANSACTION DOCUMENT — it records a property transfer between parties with consideration amount, stamp duty, witnesses, and SRO registration endorsements.
-- If the document has a table of survey numbers with extents and land classifications but NO buyer/seller/consideration details, it is a PATTA, not a Sale Deed.
-- If the document shows "பட்டா எண்" (Patta Number) anywhere, it is almost certainly a PATTA.
-- Multiple survey entries in a neat table = likely PATTA. Narrative text describing property transfer = likely SALE_DEED.
+- If the document has a table of survey numbers with extents and land classifications but NO buyer/seller/consideration details, check the title: "அ-பதிவேடு" → A_REGISTER; "பட்டா" → PATTA.
+- Multiple survey entries in a neat table = likely PATTA or A_REGISTER (distinguish by title). Narrative text describing property transfer = likely SALE_DEED.
 
 Return ONLY valid JSON:
 {

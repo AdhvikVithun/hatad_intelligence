@@ -69,11 +69,14 @@ export interface CheckResult {
   evidence?: string;
   unverified?: boolean;
   unreliable?: boolean;
+  data_confidence?: string;
+  data_confidence_score?: number;
   guardrail_warnings?: string[];
   ground_truth?: {
     verified: boolean;
     matches: string[];
     mismatches: string[];
+    skipped?: string[];
   };
 }
 
@@ -86,11 +89,37 @@ export interface ChainLink {
   document_number: string;
   valid: boolean;
   notes?: string;
+  transaction_id?: string;
+}
+
+// ── API response types ──────────────────────────────
+
+export interface UploadResponse {
+  uploaded: DocFile[];
+  count: number;
+  message: string;
+}
+
+export interface StartAnalysisResponse {
+  session_id: string;
+  status: string;
+  message: string;
+}
+
+export interface SessionsResponse {
+  sessions: SessionHistoryItem[];
+}
+
+export interface LLMHealthResponse {
+  status: string;
+  model?: string;
+  error?: string;
 }
 
 export interface SessionData {
   session_id: string;
   status: string;
+  incomplete?: boolean;
   risk_score: number | null;
   risk_band: string | null;
   documents: DocFile[];
@@ -173,10 +202,11 @@ export const PIPELINE_STAGES = [
 
 export const VERIFY_GROUPS = [
   { id: 1, name: 'EC-Only', checks: 5, icon: '[1]', needs: 'EC' },
-  { id: 2, name: 'Sale Deed', checks: 9, icon: '[2]', needs: 'SALE_DEED' },
-  { id: 3, name: 'Cross-Doc', checks: 14, icon: '[3]', needs: 'EC+PATTA+SD' },
-  { id: 4, name: 'Chain', checks: 12, icon: '[4]', needs: 'EC+SD' },
-  { id: 5, name: 'Meta', checks: 2, icon: '[5]', needs: 'Results 1-4' },
+  { id: 2, name: 'Sale Deed', checks: 4, icon: '[2]', needs: 'SALE_DEED' },
+  { id: 3, name: 'Cross-Doc Property', checks: 6, icon: '[3]', needs: 'EC+PATTA+SD' },
+  { id: 4, name: 'Compliance', checks: 6, icon: '[4]', needs: 'EC+PATTA+SD' },
+  { id: 5, name: 'Chain & Pattern', checks: 10, icon: '[5]', needs: 'EC+SD' },
+  { id: 6, name: 'Meta', checks: 2, icon: '[M]', needs: 'Results 1-5' },
 ] as const;
 
 export type TabId = 'pipeline' | 'log' | 'summary' | 'checks' | 'chain' | 'transactions' | 'identity' | 'knowledge' | 'report';

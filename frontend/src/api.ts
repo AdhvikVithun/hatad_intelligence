@@ -1,17 +1,54 @@
 /* API client for HATAD backend */
 
+import type {
+  UploadResponse,
+  StartAnalysisResponse,
+  SessionData,
+  SessionsResponse,
+  LLMHealthResponse,
+} from './types';
+
 const BASE = '/api';
 
-export async function uploadDocuments(files: File[]): Promise<any> {
+// ── Retry helper ────────────────────────────────────
+
+async function fetchWithRetry(
+  input: RequestInfo,
+  init?: RequestInit,
+  retries = 2,
+): Promise<Response> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(input, init);
+      // Retry on 5xx server errors (not on 4xx client errors)
+      if (res.status >= 500 && attempt < retries) {
+        await new Promise(r => setTimeout(r, 1000 * 2 ** attempt));
+        continue;
+      }
+      return res;
+    } catch (err) {
+      lastError = err;
+      if (attempt < retries) {
+        await new Promise(r => setTimeout(r, 1000 * 2 ** attempt));
+      }
+    }
+  }
+  throw lastError;
+}
+
+// ── API functions ───────────────────────────────────
+
+export async function uploadDocuments(files: File[]): Promise<UploadResponse> {
   const formData = new FormData();
   files.forEach(f => formData.append('files', f));
-  const res = await fetch(`${BASE}/documents/upload`, { method: 'POST', body: formData });
+  const res = await fetchWithRetry(`${BASE}/documents/upload`, { method: 'POST', body: formData });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
-export async function startAnalysis(filenames: string[]): Promise<any> {
-  const res = await fetch(`${BASE}/analyze/start`, {
+export async function startAnalysis(filenames: string[]): Promise<StartAnalysisResponse> {
+  const res = await fetchWithRetry(`${BASE}/analyze/start`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ filenames }),
@@ -57,21 +94,21 @@ export function streamAnalysis(
   return () => es.close();
 }
 
-export async function getResults(sessionId: string): Promise<any> {
-  const res = await fetch(`${BASE}/analyze/${sessionId}/results`);
+export async function getResults(sessionId: string): Promise<SessionData> {
+  const res = await fetchWithRetry(`${BASE}/analyze/${sessionId}/results`);
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
-export async function getSessions(): Promise<any> {
-  const res = await fetch(`${BASE}/analyze/sessions`);
+export async function getSessions(): Promise<SessionsResponse> {
+  const res = await fetchWithRetry(`${BASE}/analyze/sessions`);
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
-export async function checkLLMHealth(): Promise<any> {
+export async function checkLLMHealth(): Promise<LLMHealthResponse> {
   try {
-    const res = await fetch(`${BASE}/analyze/health/llm`);
+    const res = await fetchWithRetry(`${BASE}/analyze/health/llm`);
     return res.json();
   } catch {
     return { status: 'offline' };

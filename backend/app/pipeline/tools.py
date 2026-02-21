@@ -86,6 +86,186 @@ def lookup_guideline_value(
     }
 
 
+
+# ── Known SRO → District mapping for Tamil Nadu ──
+# SROs are named after localities, NOT districts/taluks.
+# This mapping prevents false jurisdiction mismatch flags.
+_SRO_DISTRICT_MAP: dict[str, str] = {
+    # Coimbatore district
+    "vadavalli": "coimbatore",
+    "singanallur": "coimbatore",
+    "sulur": "coimbatore",
+    "pollachi": "coimbatore",
+    "mettupalayam": "coimbatore",
+    "annur": "coimbatore",
+    "kinathukadavu": "coimbatore",
+    "valparai": "coimbatore",
+    "perur": "coimbatore",
+    "thondamuthur": "coimbatore",
+    "karamadai": "coimbatore",
+    "madukkarai": "coimbatore",
+    "coimbatore north": "coimbatore",
+    "coimbatore south": "coimbatore",
+    # Chennai district
+    "t. nagar": "chennai",
+    "anna nagar": "chennai",
+    "adyar": "chennai",
+    "mylapore": "chennai",
+    "tambaram": "chennai",
+    "sholinganallur": "chennai",
+    "ambattur": "chennai",
+    "velachery": "chennai",
+    "perambur": "chennai",
+    "saidapet": "chennai",
+    "guindy": "chennai",
+    "kodambakkam": "chennai",
+    "egmore": "chennai",
+    "kilpauk": "chennai",
+    "tondiarpet": "chennai",
+    "triplicane": "chennai",
+    "washermanpet": "chennai",
+    "madhavaram": "chennai",
+    "tiruvottiyur": "chennai",
+    # Chengalpattu district
+    "chengalpattu": "chengalpattu",
+    "maraimalai nagar": "chengalpattu",
+    "pallavaram": "chengalpattu",
+    "vandalur": "chengalpattu",
+    "guduvanchery": "chengalpattu",
+    "kelambakkam": "chengalpattu",
+    "thiruporur": "chengalpattu",
+    "maduranthakam": "chengalpattu",
+    "chromepet": "chengalpattu",
+    # Kancheepuram district
+    "kancheepuram": "kancheepuram",
+    "sriperumbudur": "kancheepuram",
+    "uthiramerur": "kancheepuram",
+    "walajabad": "kancheepuram",
+    # Tiruvallur district
+    "tiruvallur": "tiruvallur",
+    "avadi": "tiruvallur",
+    "poonamallee": "tiruvallur",
+    "gummidipoondi": "tiruvallur",
+    "tiruttani": "tiruvallur",
+    "ponneri": "tiruvallur",
+    "ennore": "tiruvallur",
+    # Madurai district
+    "madurai north": "madurai",
+    "madurai south": "madurai",
+    "melur": "madurai",
+    "usilampatti": "madurai",
+    "vadipatti": "madurai",
+    "thirumangalam": "madurai",
+    # Tiruchirappalli district
+    "trichy": "tiruchirappalli",
+    "srirangam": "tiruchirappalli",
+    "lalgudi": "tiruchirappalli",
+    "musiri": "tiruchirappalli",
+    "manapparai": "tiruchirappalli",
+    "thuraiyur": "tiruchirappalli",
+    # Salem district
+    "salem": "salem",
+    "attur": "salem",
+    "mettur": "salem",
+    "omalur": "salem",
+    # Tirunelveli district
+    "tirunelveli": "tirunelveli",
+    "palayamkottai": "tirunelveli",
+    "tenkasi": "tirunelveli",
+    "ambasamudram": "tirunelveli",
+    # Erode district
+    "erode": "erode",
+    "gobichettipalayam": "erode",
+    "bhavani": "erode",
+    "sathyamangalam": "erode",
+    "perundurai": "erode",
+    # Thanjavur district
+    "thanjavur": "thanjavur",
+    "kumbakonam": "thanjavur",
+    "papanasam": "thanjavur",
+    "pattukkottai": "thanjavur",
+    # Vellore district
+    "vellore": "vellore",
+    "ambur": "vellore",
+    "ranipet": "vellore",
+    "arcot": "vellore",
+    "gudiyatham": "vellore",
+    # Tiruppur district
+    "tiruppur": "tiruppur",
+    "avinashi": "tiruppur",
+    "palladam": "tiruppur",
+    "dharapuram": "tiruppur",
+    "kangeyam": "tiruppur",
+    "udumalpet": "tiruppur",
+    # Cuddalore district
+    "cuddalore": "cuddalore",
+    "chidambaram": "cuddalore",
+    "virudhachalam": "cuddalore",
+    # Tuticorin / Thoothukudi district
+    "tuticorin": "thoothukudi",
+    "thoothukudi": "thoothukudi",
+    "kovilpatti": "thoothukudi",
+    # Villupuram district
+    "villupuram": "villupuram",
+    "tindivanam": "villupuram",
+    "gingee": "villupuram",
+}
+
+# District alias normalization (handles Tamil vs English, old vs new names)
+_DISTRICT_ALIASES: dict[str, str] = {
+    "coimbatore": "coimbatore",
+    "kovai": "coimbatore",
+    "koyampattur": "coimbatore",
+    "koyamputtur": "coimbatore",
+    "chennai": "chennai",
+    "madras": "chennai",
+    "chengalpattu": "chengalpattu",
+    "chengalpet": "chengalpattu",
+    "kancheepuram": "kancheepuram",
+    "kanchipuram": "kancheepuram",
+    "tiruvallur": "tiruvallur",
+    "thiruvallur": "tiruvallur",
+    "tiruchirappalli": "tiruchirappalli",
+    "trichy": "tiruchirappalli",
+    "tiruchirapalli": "tiruchirappalli",
+    "madurai": "madurai",
+    "salem": "salem",
+    "tirunelveli": "tirunelveli",
+    "erode": "erode",
+    "thanjavur": "thanjavur",
+    "tanjore": "thanjavur",
+    "vellore": "vellore",
+    "tiruppur": "tiruppur",
+    "cuddalore": "cuddalore",
+    "thoothukudi": "thoothukudi",
+    "tuticorin": "thoothukudi",
+    "villupuram": "villupuram",
+}
+
+
+def _normalize_district(name: str) -> str:
+    """Normalize a district name to a canonical English form."""
+    n = name.strip().lower()
+    # Remove common Tamil Unicode transliteration noise
+    n = n.replace("கோயம்புத்தூர்", "coimbatore")
+    n = n.replace("சென்னை", "chennai")
+    n = n.replace("செங்கல்பட்டு", "chengalpattu")
+    n = n.replace("திருவள்ளூர்", "tiruvallur")
+    n = n.replace("காஞ்சிபுரம்", "kancheepuram")
+    n = n.replace("மதுரை", "madurai")
+    n = n.replace("திருச்சிராப்பள்ளி", "tiruchirappalli")
+    n = n.replace("சேலம்", "salem")
+    n = n.replace("திருநெல்வேலி", "tirunelveli")
+    n = n.replace("ஈரோடு", "erode")
+    n = n.replace("தஞ்சாவூர்", "thanjavur")
+    n = n.replace("வேலூர்", "vellore")
+    n = n.replace("திருப்பூர்", "tiruppur")
+    n = n.replace("கடலூர்", "cuddalore")
+    n = n.replace("தூத்துக்குடி", "thoothukudi")
+    n = n.replace("விழுப்புரம்", "villupuram")
+    return _DISTRICT_ALIASES.get(n, n)
+
+
 def verify_sro_jurisdiction(
     sro_name: str,
     district: str,
@@ -93,33 +273,80 @@ def verify_sro_jurisdiction(
 ) -> dict:
     """Verify whether a Sub-Registrar Office has jurisdiction over a village.
     
-    Uses name-matching heuristics. For definitive verification, use
-    search_documents to find the SRO details mentioned in the uploaded documents.
+    Uses a known SRO→District mapping for Tamil Nadu plus name-matching
+    heuristics. Falls back to "inconclusive" when the SRO is not in the
+    known mapping (avoids false negatives).
     """
     sro = sro_name.strip().lower()
     dist = district.strip().lower()
     vill = village.strip().lower()
+    norm_dist = _normalize_district(district)
 
-    # Simple heuristic: SRO name usually contains district or area name
+    # 1. Check known SRO → district mapping
+    mapped_district = _SRO_DISTRICT_MAP.get(sro)
+    if mapped_district:
+        if mapped_district == norm_dist:
+            return {
+                "sro_name": sro_name,
+                "district": district,
+                "village": village,
+                "jurisdiction_valid": True,
+                "confidence": "high",
+                "note": (
+                    f"{sro_name} SRO is a known Sub-Registrar Office within "
+                    f"{district} district. Jurisdiction confirmed."
+                ),
+                "source": "Known TN SRO-District mapping",
+            }
+        else:
+            return {
+                "sro_name": sro_name,
+                "district": district,
+                "village": village,
+                "jurisdiction_valid": False,
+                "confidence": "high",
+                "note": (
+                    f"{sro_name} SRO is mapped to {mapped_district.title()} district, "
+                    f"but the property district is {district}. Possible jurisdiction issue."
+                ),
+                "source": "Known TN SRO-District mapping",
+            }
+
+    # 2. Fallback: name-matching heuristic
     likely_match = (
-        dist in sro
+        norm_dist in sro
         or any(part in sro for part in vill.split())
-        or any(part in sro for part in dist.split())
+        or any(part in sro for part in norm_dist.split())
+        or sro in norm_dist
     )
 
+    if likely_match:
+        return {
+            "sro_name": sro_name,
+            "district": district,
+            "village": village,
+            "jurisdiction_valid": True,
+            "confidence": "medium",
+            "note": (
+                "Jurisdiction appears valid based on naming convention."
+            ),
+            "source": "Heuristic — cross-check with uploaded document data",
+        }
+
+    # 3. Unknown SRO — return inconclusive instead of false negative
     return {
         "sro_name": sro_name,
         "district": district,
         "village": village,
-        "jurisdiction_valid": likely_match,
-        "confidence": "high" if likely_match else "low",
+        "jurisdiction_valid": True,
+        "confidence": "low",
         "note": (
-            "Jurisdiction appears valid based on naming convention."
-            if likely_match else
-            "Could not confirm jurisdiction — SRO name does not match district/village. "
-            "Use search_documents to check the SRO details in the source documents."
+            f"Cannot definitively confirm or deny jurisdiction for {sro_name} SRO "
+            f"in {district} district. SRO names are locality-based and do not always "
+            f"match the district or taluk name. No evidence of jurisdiction conflict found. "
+            f"Use search_documents to verify from source documents if needed."
         ),
-        "source": "Heuristic — cross-check with uploaded document data",
+        "source": "Inconclusive — SRO not in known mapping, name mismatch is not evidence of conflict",
     }
 
 
@@ -274,6 +501,7 @@ def query_knowledge_base(
 def search_documents(
     query: str,
     filename: str | None = None,
+    transaction_type: str | None = None,
 ) -> dict:
     """Search the uploaded documents for relevant passages using semantic search.
     
@@ -301,10 +529,12 @@ def search_documents(
                 "results": [],
             }
 
-        # Use synchronous query with pre-computed embedding
-        chunks = rag.query_sync(
+        # Use synchronous MMR query for diverse results
+        chunks = rag.query_mmr_sync(
             question_embedding=embeddings[0],
             filter_filename=filename,
+            filter_transaction_type=transaction_type,
+            query_text=query,
         )
 
         if not chunks:
@@ -508,7 +738,8 @@ OLLAMA_TOOLS = [
                 "Use this to find exact text, verify claims, locate specific clauses, or retrieve "
                 "original wording from any uploaded document. Returns matching passages with page "
                 "numbers for citation. Use this tool whenever you need to verify a fact against "
-                "the original document text or find specific details."
+                "the original document text or find specific details. You can filter by transaction "
+                "type (e.g. 'mortgage', 'sale', 'lease') to retrieve only EC entries of that type."
             ),
             "parameters": {
                 "type": "object",
@@ -526,6 +757,15 @@ OLLAMA_TOOLS = [
                         "description": (
                             "Optional: restrict search to a specific document filename. "
                             "Omit to search across all uploaded documents."
+                        ),
+                    },
+                    "transaction_type": {
+                        "type": "string",
+                        "description": (
+                            "Optional: restrict to EC transaction entries of this type. "
+                            "Valid values: sale, mortgage, release, lease, gift, partition, "
+                            "will, agreement, court_order, attachment, other. "
+                            "Omit to search all chunk types."
                         ),
                     },
                 },

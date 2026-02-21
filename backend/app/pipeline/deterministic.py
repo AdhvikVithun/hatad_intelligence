@@ -37,7 +37,7 @@ from app.pipeline.utils import (
     TITLE_TRANSFER_TYPES,
     CHAIN_RELEVANT_TYPES,
 )
-from app.config import TRACE_ENABLED
+from app.config import TRACE_ENABLED, TN_STAMP_DUTY_RATE, TN_REGISTRATION_FEE_RATE
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +165,8 @@ def check_ec_period_coverage(extracted_data: dict) -> list[dict]:
                 txn_date = _parse_date(txn.get("date", ""))
                 if txn_date and prev_date and txn_date < prev_date:
                     sorted_issues.append(
-                        f"Row {txn.get('row_number', '?')}: {txn.get('date')} is before "
+                        f"{txn.get('transaction_id', 'Row ' + str(txn.get('row_number', '?')))}: "
+                        f"{txn.get('date')} is before "
                         f"preceding transaction date"
                     )
                 if txn_date:
@@ -240,7 +241,8 @@ def check_limitation_period(extracted_data: dict) -> list[dict]:
                 ttype = txn.get("transaction_type", "unknown")
                 if ttype.lower() in CHAIN_RELEVANT_TYPES:
                     stale_txns.append(
-                        f"Row {txn.get('row_number', '?')}: {ttype} on {txn.get('date')} "
+                        f"{txn.get('transaction_id', 'Row ' + str(txn.get('row_number', '?')))}: "
+                        f"{ttype} on {txn.get('date')} "
                         f"({(now - txn_date).days // 365} years ago)"
                     )
 
@@ -262,9 +264,9 @@ def check_limitation_period(extracted_data: dict) -> list[dict]:
 # 2. STAMP DUTY CALCULATOR (Tamil Nadu)
 # ═══════════════════════════════════════════════════
 
-# Tamil Nadu stamp duty rates (as of 2024)
-_TN_STAMP_DUTY_RATE = 0.07         # 7% of property value
-_TN_REGISTRATION_FEE_RATE = 0.04   # 4% (capped at ₹4 lakhs for residential)
+# Tamil Nadu stamp duty rates (from config, env-overridable)
+_TN_STAMP_DUTY_RATE = TN_STAMP_DUTY_RATE
+_TN_REGISTRATION_FEE_RATE = TN_REGISTRATION_FEE_RATE
 _TN_SURCHARGE_RATE = 0.01          # 1% transfer duty
 # Total: ~12% for most transactions
 
@@ -391,7 +393,7 @@ def check_plausibility_ranges(extracted_data: dict) -> list[dict]:
         if doc_type == "SALE_DEED":
             prop = d.get("property", {})
             extent_text = prop.get("extent") if isinstance(prop, dict) else None
-        elif doc_type in ("PATTA", "CHITTA"):
+        elif doc_type in ("PATTA", "CHITTA", "A_REGISTER"):
             extent_text = d.get("total_extent") or d.get("extent")
         else:
             extent_text = None
@@ -472,32 +474,120 @@ def _parse_area_to_sqft(text: str) -> Optional[float]:
 
 
 def check_area_consistency(extracted_data: dict) -> list[dict]:
-    """Cross-check property extent across all documents after unit normalization."""
+    """Cross-check property extent across all documents after unit normalization.
+
+    Patta-portfolio aware: A Patta is an *owner-level* document listing ALL
+    surveys held by one owner.  For area comparison we use only the Patta
+    survey rows whose survey numbers match a survey in any non-Patta document
+    (EC ∪ Sale Deed ∪ FMB).  The aggregate ``total_extent`` is preserved for
+    Urban Land Ceiling Act / ceiling-surplus compliance checks.
+    """
     checks = []
-    area_records: list[tuple[str, str, float, str]] = []  # (filename, doc_type, sqft, original_text)
 
-    for filename, data in extracted_data.items():
-        doc_type = data.get("document_type", "")
-        d = data.get("data", {})
+    # ── Pass 1: collect target survey numbers from every non-Patta doc ──
+    target_surveys: list[str] = []
+    for _fn, fdata in extracted_data.items():
+        dt = fdata.get("document_type", "")
+        d = fdata.get("data", {})
+        if dt in ("PATTA", "CHITTA", "A_REGISTER"):
+            continue
+        if dt == "SALE_DEED":
+            prop = d.get("property", {})
+            if isinstance(prop, dict):
+                sn = prop.get("survey_number", "")
+                if sn:
+                    target_surveys.extend(split_survey_numbers(sn))
+        elif dt == "EC":
+            prop_desc = d.get("property_description", "")
+            m = re.search(
+                r'(?:s\.?f\.?\s*no\.?|r\.?s\.?\s*no\.?|t\.?s\.?\s*no\.?|'
+                r'o\.?s\.?\s*no\.?|n\.?s\.?\s*no\.?|s\.?no\.?|survey\s*no\.?|'
+                r'sy\.?\s*no\.?)\s*:?\s*([\d/\-A-Za-z,\s]+)',
+                prop_desc, re.IGNORECASE,
+            )
+            if m:
+                target_surveys.extend(split_survey_numbers(m.group(1).strip()))
+            for txn in d.get("transactions", []):
+                sn = txn.get("survey_number", "")
+                if sn:
+                    target_surveys.extend(split_survey_numbers(sn))
+        else:
+            # FMB, A-certificate, etc.
+            sn = d.get("survey_number", "")
+            if sn:
+                target_surveys.extend(split_survey_numbers(sn))
 
-        extent_text = None
+    target_surveys = list(set(filter(None, target_surveys)))
+
+    # ── Pass 2: collect area records (Patta-portfolio filtered) ──
+    area_records: list[tuple[str, str, float, str]] = []  # (filename, doc_type, sqft, text)
+
+    for filename, fdata in extracted_data.items():
+        doc_type = fdata.get("document_type", "")
+        d = fdata.get("data", {})
+
         if doc_type == "SALE_DEED":
             prop = d.get("property", {})
             if isinstance(prop, dict):
                 extent_text = prop.get("extent")
-        elif doc_type in ("PATTA", "CHITTA"):
-            extent_text = d.get("total_extent") or d.get("extent")
-        elif doc_type == "EC":
-            # EC may have extent per transaction; use from property description
-            extent_text = d.get("property_description", "")
+                if extent_text:
+                    sqft = _parse_area_to_sqft(str(extent_text))
+                    if sqft and sqft > 0:
+                        area_records.append((filename, doc_type, sqft, str(extent_text)))
 
-        if extent_text:
-            sqft = _parse_area_to_sqft(str(extent_text))
-            if sqft and sqft > 0:
-                area_records.append((filename, doc_type, sqft, str(extent_text)))
+        elif doc_type in ("PATTA", "CHITTA", "A_REGISTER"):
+            survey_numbers = d.get("survey_numbers", [])
+            if isinstance(survey_numbers, list) and survey_numbers and target_surveys:
+                # Only sum extents for Patta surveys matching a target survey
+                matched_sqft = 0.0
+                matched_texts: list[str] = []
+                for sn_obj in survey_numbers:
+                    if not isinstance(sn_obj, dict):
+                        continue
+                    sn = sn_obj.get("survey_no", "")
+                    sn_ext = sn_obj.get("extent", "")
+                    if not sn or not sn_ext:
+                        continue
+                    for tgt in target_surveys:
+                        m_ok, _ = survey_numbers_match(sn, tgt)
+                        if m_ok:
+                            sqft = _parse_area_to_sqft(str(sn_ext))
+                            if sqft and sqft > 0:
+                                matched_sqft += sqft
+                                matched_texts.append(f"{sn}: {sn_ext}")
+                            break
+                if matched_sqft > 0:
+                    area_records.append((filename, doc_type, matched_sqft,
+                                        " + ".join(matched_texts)))
+                else:
+                    _trace(f"AREA_CHECK Patta {filename}: no surveys match "
+                           f"targets {target_surveys}, skipping area comparison")
+            elif not target_surveys:
+                # No non-Patta surveys known — fall back to total_extent
+                extent_text = d.get("total_extent") or d.get("extent")
+                if extent_text:
+                    sqft = _parse_area_to_sqft(str(extent_text))
+                    if sqft and sqft > 0:
+                        area_records.append((filename, doc_type, sqft, str(extent_text)))
+
+        elif doc_type == "EC":
+            extent_text = d.get("property_description", "")
+            if extent_text:
+                sqft = _parse_area_to_sqft(str(extent_text))
+                if sqft and sqft > 0:
+                    area_records.append((filename, doc_type, sqft, str(extent_text)))
+
+        else:
+            # FMB, A-certificate, etc.
+            extent_text = d.get("extent") or d.get("area")
+            if extent_text:
+                sqft = _parse_area_to_sqft(str(extent_text))
+                if sqft and sqft > 0:
+                    area_records.append((filename, doc_type, sqft, str(extent_text)))
 
     _trace(f"AREA_CHECK records={[(fn,dt,f'{sqft:.0f}sqft') for fn,dt,sqft,_ in area_records]}")
-    # Compare all pairs for mismatches (>10% tolerance)
+
+    # ── Pairwise comparison (>10 % tolerance) ──
     if len(area_records) >= 2:
         mismatches = []
         for i in range(len(area_records)):
@@ -521,6 +611,39 @@ def check_area_consistency(extracted_data: dict) -> list[dict]:
                 "may indicate encroachment, sub-division, or data errors.",
                 " | ".join(mismatches[:3]),
             ))
+
+    # ── Patta-portfolio INFO when Patta covers more surveys than the target ──
+    for filename, fdata in extracted_data.items():
+        doc_type = fdata.get("document_type", "")
+        d = fdata.get("data", {})
+        if doc_type not in ("PATTA", "CHITTA", "A_REGISTER"):
+            continue
+        total_ext = d.get("total_extent")
+        if not total_ext or not target_surveys:
+            continue
+        total_sqft = _parse_area_to_sqft(str(total_ext))
+        if not total_sqft or total_sqft <= 0:
+            continue
+        matched_rec = [r for r in area_records if r[0] == filename]
+        if matched_rec:
+            matched_sqft = matched_rec[0][2]
+            if abs(total_sqft - matched_sqft) / max(total_sqft, matched_sqft) > 0.10:
+                sn_list = [s.get("survey_no", "?") for s in d.get("survey_numbers", [])
+                           if isinstance(s, dict)]
+                checks.append(_make_check(
+                    "DET_PATTA_PORTFOLIO",
+                    "Patta Lists Additional Surveys (Owner Portfolio)",
+                    "LOW", "INFO",
+                    f"Patta ({filename}) lists {len(sn_list)} surveys with total extent "
+                    f"{total_ext} ({total_sqft:.0f} sqft), but only the matching survey(s) "
+                    f"({matched_rec[0][3]}, {matched_sqft:.0f} sqft) were used for comparison. "
+                    f"The Patta is an owner-level document covering this owner's entire "
+                    f"land portfolio, not just the property under due diligence.",
+                    "This is normal. Patta reflects the owner's full land holdings. "
+                    "The total_extent is relevant for Urban Land Ceiling Act checks.",
+                    f"Patta surveys: {', '.join(sn_list)} | Total: {total_ext} "
+                    f"| Matched: {matched_rec[0][3]}",
+                ))
 
     return checks
 
@@ -645,7 +768,7 @@ def _check_names_via_identity(extracted_data: dict, resolver) -> list[dict]:
         for entry in extracted_data.values()
     )
     has_patta = any(
-        entry.get("document_type") in ("PATTA", "CHITTA")
+        entry.get("document_type") in ("PATTA", "CHITTA", "A_REGISTER")
         and isinstance(entry.get("data", {}).get("owner_names"), list)
         and entry["data"]["owner_names"]
         for entry in extracted_data.values()
@@ -662,14 +785,48 @@ def _check_names_via_identity(extracted_data: dict, resolver) -> list[dict]:
                 evidence,
             ))
         else:
-            checks.append(_make_check(
-                "DET_BUYER_PATTA_MISMATCH", "Buyer-Patta Owner Identity Mismatch",
-                "HIGH", "WARNING",
-                evidence,
-                "Verify that patta has been transferred to the buyer's name. If not, "
-                "ensure patta transfer is a condition of the transaction.",
-                evidence,
-            ))
+            # Before flagging, check if SELLER matches patta owner.
+            # In TN, the Patta stays in the seller's name until mutation.
+            # If seller == patta_owner, the buyer not matching is EXPECTED
+            # (pending mutation), not a title defect.
+            has_sellers = any(
+                entry.get("document_type") == "SALE_DEED"
+                and isinstance(entry.get("data", {}).get("seller"), list)
+                and entry["data"]["seller"]
+                for entry in extracted_data.values()
+            )
+            seller_is_patta_owner = False
+            if has_sellers:
+                seller_same, _, seller_ev = resolver.roles_share_identity(
+                    "seller", "patta_owner"
+                )
+                seller_is_patta_owner = seller_same
+
+            if seller_is_patta_owner:
+                # Seller matches patta owner → buyer not matching is normal
+                checks.append(_make_check(
+                    "DET_BUYER_PATTA_MATCH",
+                    "Patta Mutation Pending (Normal)",
+                    "MEDIUM", "INFO",
+                    f"Buyer does not yet appear as Patta owner, but the seller "
+                    f"matches the current Patta owner — this is normal in Tamil Nadu. "
+                    f"The Patta will be mutated to the buyer's name after registration.\n"
+                    f"Buyer ↔ Patta: {evidence}\n"
+                    f"Seller ↔ Patta: {seller_ev}",
+                    "Buyer should apply for patta transfer (mutation) at the taluk office "
+                    "after registration. This is a routine procedural step.",
+                    evidence,
+                ))
+            else:
+                checks.append(_make_check(
+                    "DET_BUYER_PATTA_MISMATCH",
+                    "Buyer-Patta Owner Identity Mismatch",
+                    "HIGH", "WARNING",
+                    evidence,
+                    "Verify that patta has been transferred to the buyer's name. If not, "
+                    "ensure patta transfer is a condition of the transaction.",
+                    evidence,
+                ))
 
     # Check 2: EC claimant ↔ Patta owner (when no sale deed buyers)
     if not has_buyers and has_patta:
@@ -737,130 +894,144 @@ def check_party_name_consistency(
     if identity_resolver is not None and identity_resolver._resolved:
         return _check_names_via_identity(extracted_data, identity_resolver)
 
-    # ── Legacy path: pairwise fuzzy matching ──
-    checks = []
+    # ── Fallback: pairwise fuzzy matching ──
+    return _check_names_fuzzy(extracted_data)
 
-    # Collect all parties by role
-    sellers: list[tuple[str, str]] = []     # (name, filename)
-    buyers: list[tuple[str, str]] = []      # (name, filename)
-    patta_owners: list[tuple[str, str]] = []  # (name, filename)
-    ec_parties: list[tuple[str, str, str]] = []  # (name, role, filename)
 
-    for filename, data in extracted_data.items():
-        doc_type = data.get("document_type", "")
-        d = data.get("data", {})
+def _check_names_fuzzy(extracted_data: dict) -> list[dict]:
+    """Pairwise fuzzy name matching fallback (no IdentityResolver).
+
+    Checks:
+      1. Buyer ↔ Patta owner (DET_BUYER_PATTA_MISMATCH)
+      2. Last EC claimant ↔ Sale deed seller (DET_CHAIN_NAME_GAP)
+    """
+    checks: list[dict] = []
+
+    # ── Collect names from documents ────────────────────────────
+    buyers: list[str] = []
+    sellers: list[str] = []
+    patta_owners: list[str] = []
+    ec_claimants: list[str] = []  # last claimant per transaction, chronologically
+
+    for _filename, entry in extracted_data.items():
+        doc_type = entry.get("document_type", "")
+        d = entry.get("data") or {}
 
         if doc_type == "SALE_DEED":
-            for party in (d.get("seller") or []):
-                if isinstance(party, dict):
-                    sellers.append((party.get("name", ""), filename))
-                elif isinstance(party, str):
-                    sellers.append((party, filename))
-            for party in (d.get("buyer") or []):
-                if isinstance(party, dict):
-                    buyers.append((party.get("name", ""), filename))
-                elif isinstance(party, str):
-                    buyers.append((party, filename))
+            for b in (d.get("buyer") or []):
+                n = b.get("name", "") if isinstance(b, dict) else str(b)
+                if n:
+                    buyers.append(n)
+            for s in (d.get("seller") or []):
+                n = s.get("name", "") if isinstance(s, dict) else str(s)
+                if n:
+                    sellers.append(n)
 
-        elif doc_type in ("PATTA", "CHITTA"):
-            for owner in (d.get("owner_names") or []):
-                if isinstance(owner, dict):
-                    patta_owners.append((owner.get("name", ""), filename))
-                elif isinstance(owner, str):
-                    patta_owners.append((owner, filename))
+        elif doc_type in ("PATTA", "CHITTA", "A_REGISTER"):
+            for o in (d.get("owner_names") or []):
+                n = o.get("name", "") if isinstance(o, dict) else str(o)
+                if n:
+                    patta_owners.append(n)
 
         elif doc_type == "EC":
-            for txn in d.get("transactions", []):
-                seller = txn.get("seller_or_executant", "")
-                buyer = txn.get("buyer_or_claimant", "")
-                # Split multi-party strings: "A and B" → ["A", "B"]
-                if seller:
-                    for name in split_party_names(seller):
-                        ec_parties.append((name, "executant", filename))
-                if buyer:
-                    for name in split_party_names(buyer):
-                        ec_parties.append((name, "claimant", filename))
+            for txn in (d.get("transactions") or []):
+                claimant = txn.get("buyer_or_claimant", "")
+                if claimant:
+                    ec_claimants.append(claimant)
 
-    # Check: Sale deed buyer should match patta owner
+    # ── Check 1: Buyer ↔ Patta owner ──────────────────────────
     if buyers and patta_owners:
-        for buyer_name, buyer_fn in buyers:
-            best_match = 0.0
-            best_owner = ""
-            for owner_name, _ in patta_owners:
-                sim = _name_similarity(buyer_name, owner_name)
-                if sim > best_match:
-                    best_match = sim
-                    best_owner = owner_name
-
-            _trace(f"PARTY [{buyer_fn}] buyer='{buyer_name}' best_patta_owner='{best_owner}' sim={best_match:.2f}")
-            if best_match < 0.5 and buyer_name.strip() and best_owner.strip():
-                checks.append(_make_check(
-                    "DET_BUYER_PATTA_MISMATCH", "Buyer-Patta Owner Name Mismatch",
-                    "HIGH", "WARNING",
-                    f"Sale deed buyer '{buyer_name}' does not closely match any patta owner "
-                    f"(closest: '{best_owner}', similarity: {best_match:.0%}). This may indicate "
-                    f"that patta transfer has not been completed after the sale.",
-                    "Verify that patta has been transferred to the buyer's name. If not, "
-                    "ensure patta transfer is a condition of the transaction.",
-                    f"[{buyer_fn}] buyer='{buyer_name}', patta_owner='{best_owner}' (match: {best_match:.0%})",
-                ))
-
-    # Check: EC claimant/buyer should match patta owner (when no sale deed)
-    if ec_parties and patta_owners and not buyers:
-        ec_claimants = [(name, fn) for name, role, fn in ec_parties if role == "claimant"]
-        for claimant_name, claimant_fn in ec_claimants:
-            best_match = 0.0
-            best_owner = ""
-            for owner_name, _ in patta_owners:
-                sim = _name_similarity(claimant_name, owner_name)
-                if sim > best_match:
-                    best_match = sim
-                    best_owner = owner_name
-
-            _trace(f"PARTY [{claimant_fn}] ec_claimant='{claimant_name}' best_patta_owner='{best_owner}' sim={best_match:.2f}")
-            if best_match < 0.5 and claimant_name.strip() and best_owner.strip():
-                # Skip warning for garbled Tamil names — OCR corruption
-                # can't be resolved by string matching; the vision
-                # re-check pipeline is the correct fix for these.
-                is_garbled, _quality, _reason = _detect_garbled_tamil(claimant_name)
-                if is_garbled:
-                    _trace(f"PARTY [{claimant_fn}] skipping mismatch warning — claimant name appears garbled: {_reason}")
+        # Check if any buyer matches any patta owner
+        any_match = False
+        for buyer in buyers:
+            if _detect_garbled_tamil(buyer)[0]:
+                continue  # skip garbled names
+            for owner in patta_owners:
+                if _detect_garbled_tamil(owner)[0]:
                     continue
+                sim = _name_similarity_utils(buyer, owner)
+                if sim >= 0.5:
+                    any_match = True
+                    break
+            if any_match:
+                break
+
+        if not any_match:
+            # Before flagging, check if SELLER matches patta owner.
+            # In TN, the Patta stays in the seller's name until mutation.
+            seller_matches_patta = False
+            if sellers and patta_owners:
+                for seller in sellers:
+                    if _detect_garbled_tamil(seller)[0]:
+                        continue
+                    for owner in patta_owners:
+                        if _detect_garbled_tamil(owner)[0]:
+                            continue
+                        sim = _name_similarity_utils(seller, owner)
+                        if sim >= 0.5:
+                            seller_matches_patta = True
+                            break
+                    if seller_matches_patta:
+                        break
+
+            buyer_str = ", ".join(buyers[:3])
+            owner_str = ", ".join(patta_owners[:3])
+
+            if seller_matches_patta:
+                seller_str = ", ".join(sellers[:3])
+                evidence = (
+                    f"Buyer(s): {buyer_str} do not match Patta owner(s): {owner_str}, "
+                    f"but Seller(s): {seller_str} match the Patta owner — patta mutation pending (normal)."
+                )
                 checks.append(_make_check(
-                    "DET_BUYER_PATTA_MISMATCH", "EC Buyer-Patta Owner Name Mismatch",
+                    "DET_BUYER_PATTA_MATCH",
+                    "Patta Mutation Pending (Normal)",
+                    "MEDIUM", "INFO",
+                    evidence,
+                    "Buyer should apply for patta transfer (mutation) at the taluk office "
+                    "after registration. This is a routine procedural step.",
+                    evidence,
+                ))
+            else:
+                evidence = (f"Buyer(s): {buyer_str} | Patta owner(s): {owner_str} — "
+                            f"no fuzzy match found (threshold 0.5).")
+                checks.append(_make_check(
+                    "DET_BUYER_PATTA_MISMATCH",
+                    "Buyer-Patta Owner Name Mismatch",
                     "HIGH", "WARNING",
-                    f"EC buyer/claimant '{claimant_name}' does not closely match any patta owner "
-                    f"(closest: '{best_owner}', similarity: {best_match:.0%}). This may indicate "
-                    f"that patta transfer has not been completed after the sale.",
-                    "Verify that patta has been transferred to the buyer's name. If not, "
-                    "ensure patta transfer is a condition of the transaction.",
-                    f"[{claimant_fn}] ec_claimant='{claimant_name}', patta_owner='{best_owner}' (match: {best_match:.0%})",
+                    evidence,
+                    "Verify that patta has been transferred to the buyer's name. "
+                    "If not, ensure patta transfer is a condition of the transaction.",
+                    evidence,
                 ))
 
-    # Check: Last EC claimant should match sale deed seller (chain continuity)
-    if ec_parties and sellers:
-        # Get the most recent claimants from EC
-        recent_claimants = [name for name, role, _ in ec_parties if role == "claimant"]
-        if recent_claimants:
-            last_claimant = recent_claimants[-1]
-            for seller_name, seller_fn in sellers:
-                sim = _name_similarity(last_claimant, seller_name)
-                if sim < 0.5 and seller_name.strip() and last_claimant.strip():
-                    # Skip warning for garbled Tamil names
-                    is_garbled, _q, _r = _detect_garbled_tamil(last_claimant)
-                    if is_garbled:
-                        _trace(f"PARTY skipping chain gap warning — claimant appears garbled")
-                        continue
-                    checks.append(_make_check(
-                        "DET_CHAIN_NAME_GAP", "Chain of Title Name Gap",
-                        "HIGH", "WARNING",
-                        f"Last EC claimant/buyer ('{last_claimant}') does not closely match "
-                        f"sale deed seller ('{seller_name}', similarity: {sim:.0%}). "
-                        f"There may be a gap in the chain of title.",
-                        "Verify that the sale deed seller acquired title through a valid "
-                        "transaction reflected in the EC.",
-                        f"ec_claimant='{last_claimant}', [{seller_fn}] seller='{seller_name}' (match: {sim:.0%})",
-                    ))
+    # ── Check 2: Last EC claimant ↔ Sale deed seller ──────────
+    if ec_claimants and sellers:
+        # Use the last EC claimant (most recent transaction)
+        last_claimant = ec_claimants[-1]
+        if not _detect_garbled_tamil(last_claimant)[0]:
+            any_match = False
+            for seller in sellers:
+                if _detect_garbled_tamil(seller)[0]:
+                    continue
+                sim = _name_similarity_utils(last_claimant, seller)
+                if sim >= 0.5:
+                    any_match = True
+                    break
+
+            if not any_match:
+                evidence = (f"Last EC claimant: '{last_claimant}' does not match "
+                            f"sale deed seller(s): {', '.join(sellers[:3])} — "
+                            f"possible chain-of-title break.")
+                checks.append(_make_check(
+                    "DET_CHAIN_NAME_GAP",
+                    "Chain of Title Name Gap",
+                    "HIGH", "WARNING",
+                    evidence,
+                    "Verify that the sale deed seller acquired title through a valid "
+                    "transaction reflected in the EC.",
+                    evidence,
+                ))
 
     return checks
 
@@ -874,9 +1045,16 @@ def check_survey_number_consistency(extracted_data: dict) -> list[dict]:
 
     Uses hierarchy-aware matching (311/1 ⊃ 311/1A) and OCR tolerance
     (Levenshtein ≤ 1) from utils.survey_numbers_match().
+
+    Patta-portfolio aware: A Patta is an *owner-level* document listing ALL
+    surveys held by one owner.  Surveys appearing only in the Patta (but in
+    no EC / Sale Deed / FMB) are classified as "patta-only" (the owner's
+    other holdings) and downgraded to INFO instead of CRITICAL FAIL.  Only
+    genuine mismatches among non-Patta documents are flagged as failures.
     """
     checks = []
-    survey_records: list[tuple[str, str, str, str]] = []  # (original, normalized, filename, survey_type)
+    # 5-tuple: (original, normalized, filename, survey_type, doc_type)
+    survey_records: list[tuple[str, str, str, str, str]] = []
 
     for filename, data in extracted_data.items():
         doc_type = data.get("document_type", "")
@@ -888,16 +1066,19 @@ def check_survey_number_consistency(extracted_data: dict) -> list[dict]:
                 sn = prop.get("survey_number", "")
                 if sn:
                     for s in split_survey_numbers(sn):
-                        survey_records.append((s, _normalize_survey_number(s), filename, extract_survey_type(s)))
+                        survey_records.append((s, _normalize_survey_number(s), filename,
+                                               extract_survey_type(s), doc_type))
 
-        elif doc_type in ("PATTA", "CHITTA"):
+        elif doc_type in ("PATTA", "CHITTA", "A_REGISTER"):
             for sn_obj in (d.get("survey_numbers") or []):
                 if isinstance(sn_obj, dict):
                     sn = sn_obj.get("survey_no", "")
                     if sn:
-                        survey_records.append((sn, _normalize_survey_number(sn), filename, extract_survey_type(sn)))
+                        survey_records.append((sn, _normalize_survey_number(sn), filename,
+                                               extract_survey_type(sn), doc_type))
                 elif isinstance(sn_obj, str) and sn_obj:
-                    survey_records.append((sn_obj, _normalize_survey_number(sn_obj), sn_obj, extract_survey_type(sn_obj)))
+                    survey_records.append((sn_obj, _normalize_survey_number(sn_obj), filename,
+                                           extract_survey_type(sn_obj), doc_type))
 
         elif doc_type == "EC":
             # Check property description for survey no
@@ -919,23 +1100,31 @@ def check_survey_number_consistency(extracted_data: dict) -> list[dict]:
             )
             if match:
                 for sn in split_survey_numbers(match.group(1).strip()):
-                    survey_records.append((sn, _normalize_survey_number(sn), filename, extract_survey_type(sn)))
+                    survey_records.append((sn, _normalize_survey_number(sn), filename,
+                                           extract_survey_type(sn), doc_type))
             # Also from individual transactions
             seen: set[str] = set()
             for txn in d.get("transactions", []):
                 sn = txn.get("survey_number", "")
                 if sn and sn not in seen:
                     seen.add(sn)
-                    survey_records.append((sn, _normalize_survey_number(sn), filename, extract_survey_type(sn)))
+                    survey_records.append((sn, _normalize_survey_number(sn), filename,
+                                           extract_survey_type(sn), doc_type))
 
-    _trace(f"SURVEY_CHECK {len(survey_records)} records: {[(orig,fn) for orig,_,_,fn in survey_records]}")
+        else:
+            # FMB, A-certificate, etc.
+            sn = d.get("survey_number", "")
+            if sn:
+                for s in split_survey_numbers(sn):
+                    survey_records.append((s, _normalize_survey_number(s), filename,
+                                           extract_survey_type(s), doc_type))
+
+    _trace(f"SURVEY_CHECK {len(survey_records)} records: "
+           f"{[(orig, fn, dt) for orig, _, fn, _, dt in survey_records]}")
 
     # ── Intra-EC consistency: header vs transactions ──
-    # If a single EC's property_description survey differs from its
-    # transaction survey numbers, flag an internal inconsistency.
     ec_files: dict[str, list[tuple[str, str]]] = {}  # filename → [(orig, norm)]
-    for orig, norm, fn, _st in survey_records:
-        # Only look at EC-sourced records
+    for orig, norm, fn, _st, _dt in survey_records:
         for _filename, _data in extracted_data.items():
             if _filename == fn and _data.get("document_type") == "EC":
                 ec_files.setdefault(fn, []).append((orig, norm))
@@ -943,7 +1132,6 @@ def check_survey_number_consistency(extracted_data: dict) -> list[dict]:
     for fn, recs in ec_files.items():
         if len(recs) < 2:
             continue
-        # Build mini-clusters within this single EC
         ec_clusters: list[list[str]] = []
         for orig, _norm in recs:
             placed = False
@@ -978,33 +1166,33 @@ def check_survey_number_consistency(extracted_data: dict) -> list[dict]:
     if len(survey_records) < 2:
         return checks
 
-    # Build equivalence clusters using fuzzy matching
-    clusters: list[list[tuple[str, str, str, str]]] = []  # (orig, norm, file, survey_type)
-    for orig, norm, fn, stype in survey_records:
+    # ── Build equivalence clusters (5-tuple aware) ──
+    clusters: list[list[tuple[str, str, str, str, str]]] = []
+    for orig, norm, fn, stype, dtype in survey_records:
         if not norm:
             continue
         placed = False
         for cluster in clusters:
-            # Check if this record matches any member of the cluster
-            for c_orig, c_norm, _c_fn, _c_st in cluster:
+            for c_orig, _c_norm, _c_fn, _c_st, _c_dt in cluster:
                 matched, _mtype = survey_numbers_match(orig, c_orig)
                 if matched:
-                    cluster.append((orig, norm, fn, stype))
+                    cluster.append((orig, norm, fn, stype, dtype))
                     placed = True
                     break
             if placed:
                 break
         if not placed:
-            clusters.append([(orig, norm, fn, stype)])
+            clusters.append([(orig, norm, fn, stype, dtype)])
 
-    _trace(f"SURVEY_CLUSTERS {len(clusters)} cluster(s): {[[orig for orig,_,_,_ in c] for c in clusters]}")
+    _trace(f"SURVEY_CLUSTERS {len(clusters)} cluster(s): "
+           f"{[[orig for orig, *_ in c] for c in clusters]}")
+
     if len(clusters) <= 1:
-        # Even with one cluster, check for survey type differences
         if clusters:
-            types_seen = {st for _, _, _, st in clusters[0] if st}
+            types_seen = {st for _, _, _, st, _ in clusters[0] if st}
             if len(types_seen) > 1:
                 type_details = []
-                for orig, _, fn, st in clusters[0]:
+                for orig, _, fn, st, _ in clusters[0]:
                     if st:
                         type_details.append(f"{fn}('{orig}' → {st})")
                 checks.append(_make_check(
@@ -1020,20 +1208,18 @@ def check_survey_number_consistency(extracted_data: dict) -> list[dict]:
                 ))
         return checks
 
-    # Check match types within each cluster for informational messages
-    # and flag cross-cluster mismatches
+    # ── Within-cluster match-type analysis (subdivision / OCR fuzzy) ──
     subdivision_pairs = []
     ocr_pairs = []
     for cluster in clusters:
-        for i, (oa, _na, fa, _sa) in enumerate(cluster):
-            for ob, _nb, fb, _sb in cluster[i+1:]:
+        for i, (oa, _na, fa, _sa, _da) in enumerate(cluster):
+            for ob, _nb, fb, _sb, _db in cluster[i + 1:]:
                 _m, mtype = survey_numbers_match(oa, ob)
                 if mtype == "subdivision":
                     subdivision_pairs.append((oa, ob, fa, fb))
                 elif mtype == "ocr_fuzzy":
                     ocr_pairs.append((oa, ob, fa, fb))
 
-    # Report subdivision matches as INFO (not errors)
     for oa, ob, fa, fb in subdivision_pairs:
         checks.append(_make_check(
             "DET_SURVEY_SUBDIVISION", "Survey Number Subdivision Match",
@@ -1045,7 +1231,6 @@ def check_survey_number_consistency(extracted_data: dict) -> list[dict]:
             f"{fa}('{oa}') ↔ {fb}('{ob}'): subdivision",
         ))
 
-    # Report OCR fuzzy matches as WARNING
     for oa, ob, fa, fb in ocr_pairs:
         checks.append(_make_check(
             "DET_SURVEY_OCR_FUZZY", "Survey Number Near-Match (Possible OCR Error)",
@@ -1056,10 +1241,54 @@ def check_survey_number_consistency(extracted_data: dict) -> list[dict]:
             f"{fa}('{oa}') ↔ {fb}('{ob}'): Levenshtein ≤ 1",
         ))
 
-    # If there are genuinely different clusters (after fuzzy consolidation), flag CRITICAL
-    if len(clusters) > 1:
-        # Collect survey types across all clusters
-        all_types = {st for cl in clusters for _, _, _, st in cl if st}
+    # ═══ Patta-portfolio-aware mismatch classification ═══
+    #
+    # Classify each cluster:
+    #   "shared"     — contains ≥1 record from a non-Patta doc
+    #   "patta_only" — contains ONLY Patta/Chitta records
+    #
+    # FAIL only when:
+    #   • >1 shared cluster exists (non-Patta docs disagree with each other)
+    # INFO when:
+    #   • patta-only clusters exist (owner's other holdings, not the
+    #     property under due diligence)
+
+    _PATTA_TYPES = {"PATTA", "CHITTA", "A_REGISTER"}
+    shared_clusters: list[list[tuple]] = []
+    patta_only_clusters: list[list[tuple]] = []
+
+    for cluster in clusters:
+        doc_types_in_cluster = {dt for _, _, _, _, dt in cluster}
+        if doc_types_in_cluster - _PATTA_TYPES:
+            # At least one non-Patta record
+            shared_clusters.append(cluster)
+        else:
+            patta_only_clusters.append(cluster)
+
+    _trace(f"SURVEY_CLASSIFY shared={len(shared_clusters)} patta_only={len(patta_only_clusters)}")
+
+    # Emit INFO for patta-only clusters (owner's other surveys)
+    if patta_only_clusters:
+        po_details = []
+        for cl in patta_only_clusters:
+            nums = sorted({orig for orig, *_ in cl})
+            files = sorted({fn for _, _, fn, _, _ in cl})
+            po_details.append(f"{', '.join(files)}: {{{', '.join(nums)}}}")
+        checks.append(_make_check(
+            "DET_PATTA_ONLY_SURVEYS",
+            "Patta Lists Additional Surveys (Owner Portfolio)",
+            "LOW", "INFO",
+            f"The Patta lists {sum(len(cl) for cl in patta_only_clusters)} survey(s) "
+            f"that do not appear in any other document (EC, Sale Deed, FMB). "
+            f"This is expected — a Patta is an owner-level document covering the "
+            f"owner's entire land portfolio, not just the property under due diligence.",
+            "No action required. These are the owner's other land holdings.",
+            " | ".join(po_details[:5]),
+        ))
+
+    # Only flag CRITICAL FAIL when non-Patta documents genuinely disagree
+    if len(shared_clusters) > 1:
+        all_types = {st for cl in shared_clusters for _, _, _, st, _ in cl if st}
         type_note = ""
         if len(all_types) > 1:
             type_note = (f" Note: documents use different survey type prefixes "
@@ -1067,24 +1296,25 @@ def check_survey_number_consistency(extracted_data: dict) -> list[dict]:
                          f"difference if old/new survey numbers haven't been mapped.")
 
         detail_parts = []
-        for i, cluster in enumerate(clusters):
+        for i, cluster in enumerate(shared_clusters):
             entries = []
-            for orig, _n, fn, st in cluster:
+            for orig, _n, fn, st, _dt in cluster:
                 label = f"{fn}('{orig}')"
                 if st:
                     label = f"{fn}('{orig}' [{st}])"
                 entries.append(label)
-            detail_parts.append(f"Group {i+1}: {', '.join(entries)}")
+            detail_parts.append(f"Group {i + 1}: {', '.join(entries)}")
 
         checks.append(_make_check(
             "DET_SURVEY_MISMATCH", "Survey Number Inconsistency Across Documents",
             "CRITICAL", "FAIL",
-            f"Found {len(clusters)} distinct survey number group(s) across documents. "
-            f"Documents for the same property should reference the same survey number "
-            f"(accounting for subdivisions).{type_note}",
+            f"Found {len(shared_clusters)} distinct survey number group(s) across "
+            f"non-Patta documents. Documents for the same property should reference "
+            f"the same survey number (accounting for subdivisions).{type_note}",
             "Verify the correct survey number from the village revenue records. "
             "Mismatch may indicate wrong documents or mixed-up properties."
-            + (" Check the old survey ↔ new survey mapping at the taluk office." if type_note else ""),
+            + (" Check the old survey ↔ new survey mapping at the taluk office."
+               if type_note else ""),
             " | ".join(detail_parts[:5]),
         ))
 
@@ -1363,13 +1593,14 @@ def check_financial_scale_anomalies(extracted_data: dict) -> list[dict]:
             if amount and amount > 0:
                 valued_txns.append({
                     "type": ttype, "amount": amount, "date": date,
-                    "row": txn.get("row_number", "?"), "doc_no": doc_no,
+                    "row": txn.get("transaction_id", txn.get("row_number", "?")),
+                    "doc_no": doc_no,
                 })
 
             if ttype == "MORTGAGE" and amount and amount > 0:
                 mortgages.append({
                     "amount": amount, "date": date, "doc_no": doc_no,
-                    "row": txn.get("row_number", "?"),
+                    "row": txn.get("transaction_id", txn.get("row_number", "?")),
                 })
             elif ttype in ("RELEASE", "RECONVEYANCE"):
                 # Track released mortgages by document number reference
@@ -1386,6 +1617,13 @@ def check_financial_scale_anomalies(extracted_data: dict) -> list[dict]:
 
         # Check 1: Scale jumps between consecutive valued transactions
         if len(valued_txns) >= 2:
+            def _fmt(v: float) -> str:
+                if v >= 1_00_00_000:
+                    return f"₹{v/1_00_00_000:.1f} Cr"
+                elif v >= 1_00_000:
+                    return f"₹{v/1_00_000:.1f} L"
+                return f"₹{v:,.0f}"
+
             for i in range(1, len(valued_txns)):
                 prev = valued_txns[i - 1]
                 curr = valued_txns[i]
@@ -1394,14 +1632,6 @@ def check_financial_scale_anomalies(extracted_data: dict) -> list[dict]:
                     inv_ratio = prev["amount"] / curr["amount"]
                     jump_ratio = max(ratio, inv_ratio)
                     if jump_ratio >= 10:
-                        # 10x jump
-                        def _fmt(v: float) -> str:
-                            if v >= 1_00_00_000:
-                                return f"₹{v/1_00_00_000:.1f} Cr"
-                            elif v >= 1_00_000:
-                                return f"₹{v/1_00_000:.1f} L"
-                            return f"₹{v:,.0f}"
-
                         checks.append(_make_check(
                             "DET_FINANCIAL_SCALE_JUMP",
                             "Financial Scale Jump Detected",
@@ -1489,7 +1719,7 @@ def check_multi_village(extracted_data: dict) -> list[dict]:
                 taluk = prop.get("taluk")
                 district = prop.get("district")
 
-        elif doc_type in ("PATTA", "CHITTA"):
+        elif doc_type in ("PATTA", "CHITTA", "A_REGISTER"):
             village = d.get("village")
             taluk = d.get("taluk")
             district = d.get("district")
@@ -1702,7 +1932,7 @@ def check_field_format_validity(extracted_data: dict) -> list[dict]:
             prop = d.get("property", {})
             if isinstance(prop, dict) and prop.get("survey_number"):
                 raw_surveys.append(str(prop["survey_number"]))
-        elif doc_type in ("PATTA", "CHITTA"):
+        elif doc_type in ("PATTA", "CHITTA", "A_REGISTER"):
             for sn_obj in (d.get("survey_numbers") or []):
                 if isinstance(sn_obj, dict) and sn_obj.get("survey_no"):
                     raw_surveys.append(str(sn_obj["survey_no"]))
@@ -1731,7 +1961,7 @@ def check_field_format_validity(extracted_data: dict) -> list[dict]:
                     v = prop.get(nf)
                     if v:
                         _name_fields.append((nf, str(v)))
-        elif doc_type in ("PATTA", "CHITTA"):
+        elif doc_type in ("PATTA", "CHITTA", "A_REGISTER"):
             for nf in ("village", "taluk", "district"):
                 v = d.get(nf)
                 if v:

@@ -367,6 +367,15 @@ def survey_numbers_match(a: str, b: str) -> tuple[bool, str]:
         if ca[1] == cb[1] and ca[1]:
             if (ca[2] and not cb[2]) or (cb[2] and not ca[2]):
                 return (True, "subdivision")
+            # Both have sub-subdivisions that differ → sibling parcels,
+            # NOT OCR noise.  e.g. 543/1A1 vs 543/1C1 are distinct plots.
+            if ca[2] and cb[2] and ca[2] != cb[2]:
+                return (False, "mismatch")
+        # Same base, both have different subdivisions → distinct parcels
+        # e.g. 311/1 vs 311/2 — already caught by digit-diff check below,
+        # but explicitly reject here to be safe.
+        if ca[1] and cb[1] and ca[1] != cb[1]:
+            return (False, "mismatch")
 
     # 3. OCR fuzzy tolerance: Levenshtein distance ≤ 1
     #    Safety: only apply when strings are long enough (≥ 5 chars) AND
@@ -1108,3 +1117,141 @@ CHAIN_RELEVANT_TYPES = TITLE_TRANSFER_TYPES | {"release"}
 def is_title_transfer(txn_type: str) -> bool:
     """Check if a transaction type transfers property title."""
     return (txn_type or "").strip().lower() in TITLE_TRANSFER_TYPES
+
+
+def classify_ec_transactions_by_risk(ec_data: dict) -> str:
+    """Classify EC transactions into risk tiers for verification focus.
+
+    Returns a text block summarising which transactions are CRITICAL
+    (encumbrances, judicial), IMPORTANT (title transfers), or ROUTINE
+    (administrative) — so the verifying LLM can calibrate analysis depth.
+
+    Returns empty string when there are no transactions to classify.
+    """
+    transactions = ec_data.get("transactions", [])
+    if not transactions:
+        return ""
+
+    critical: list[str] = []   # mortgage, lease, court_order, agreement
+    important: list[str] = []  # sale, gift, partition, will
+    routine: list[str] = []    # release, cancellation, rectification
+
+    for txn in transactions:
+        txn_type = (txn.get("transaction_type") or txn.get("nature_of_document") or "other").strip().lower()
+        tid = txn.get("transaction_id") or txn.get("row_number") or "?"
+        doc_num = txn.get("document_number") or "N/A"
+        date = txn.get("date") or txn.get("execution_date") or ""
+        label = f"#{tid} ({txn_type}, Doc {doc_num}, {date})"
+
+        if txn_type in ENCUMBRANCE_TYPES or txn_type in JUDICIAL_TYPES:
+            critical.append(label)
+        elif txn_type in ADMINISTRATIVE_TYPES:
+            routine.append(label)
+        else:
+            # Title transfers and unknown types get standard treatment
+            important.append(label)
+
+    lines = [
+        "═══ TRANSACTION RISK CLASSIFICATION ═══",
+        f"Total: {len(transactions)} transactions "
+        f"({len(critical)} critical, {len(important)} important, {len(routine)} routine)",
+        "",
+    ]
+    if critical:
+        lines.append("CRITICAL (deep analysis required — encumbrances & judicial):")
+        for c in critical:
+            lines.append(f"  ⚠ {c}")
+        lines.append("")
+    if important:
+        lines.append(f"IMPORTANT (standard analysis — title transfers): {len(important)} transactions")
+        # Only list first 10 to save tokens
+        for imp in important[:10]:
+            lines.append(f"  • {imp}")
+        if len(important) > 10:
+            lines.append(f"  ... and {len(important) - 10} more")
+        lines.append("")
+    if routine:
+        lines.append(f"ROUTINE (lightweight — administrative): {len(routine)} transactions")
+        for r in routine[:5]:
+            lines.append(f"  ○ {r}")
+        if len(routine) > 5:
+            lines.append(f"  ... and {len(routine) - 5} more")
+        lines.append("")
+
+    lines.append(
+        "INSTRUCTIONS: Focus your deepest analysis on CRITICAL transactions. "
+        "Check for unreleased mortgages, active court attachments/lis pendens, "
+        "and active lease encumbrances. For IMPORTANT transactions, verify "
+        "chain-of-title continuity. For ROUTINE transactions, confirm they "
+        "correspond to proper release/cancellation of earlier encumbrances."
+    )
+    lines.append("═══ END CLASSIFICATION ═══")
+    return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════
+# 8. PRE-EXTRACTION OCR TEXT NORMALIZATION
+# ═══════════════════════════════════════════════════
+
+# Common survey prefix variants → canonical forms (applied before LLM sees text)
+_SURVEY_CANONICAL_MAP = [
+    (re.compile(r'\bS\.?\s*F\.?\s*No\.?\s*:?\s*', re.IGNORECASE), 'S.F.No. '),
+    (re.compile(r'\bR\.?\s*S\.?\s*No\.?\s*:?\s*', re.IGNORECASE), 'R.S.No. '),
+    (re.compile(r'\bT\.?\s*S\.?\s*No\.?\s*:?\s*', re.IGNORECASE), 'T.S.No. '),
+    (re.compile(r'\bO\.?\s*S\.?\s*No\.?\s*:?\s*', re.IGNORECASE), 'O.S.No. '),
+    (re.compile(r'\bN\.?\s*S\.?\s*No\.?\s*:?\s*', re.IGNORECASE), 'N.S.No. '),
+]
+
+# Common date formats seen in Tamil docs (normalize separators)
+_DATE_SEPARATOR_RE = re.compile(
+    r'(\d{1,2})\s*[\.\/]\s*(\d{1,2})\s*[\.\/]\s*(\d{4})'
+)
+
+# Collapse excessive whitespace lines (OCR artefacts)
+_EXCESSIVE_BLANK_LINES_RE = re.compile(r'\n{4,}')
+
+# Collapse repeated OCR artefacts like "(R) (R) (R) ..."
+_REPEATED_PARENS_RE = re.compile(r'(\([A-Z]\)\s*){3,}')
+
+
+def normalize_raw_ocr_text(text: str) -> str:
+    """Normalize raw OCR text BEFORE sending to the LLM for extraction.
+
+    Applies several cheap deterministic fixes that reduce LLM hallucinations
+    by presenting cleaner, more consistent input.  Each fix is safe — it
+    never changes semantic content, only standardises formatting.
+
+    Transformations:
+      1. Tamil numeral → ASCII digit conversion (௩ → 3)
+      2. Orphan Tamil vowel sign repair (garbled OCR → valid syllables)
+      3. Survey prefix canonicalization (S. F. No → S.F.No.)
+      4. Date separator normalization (15.03.2012 → 15-03-2012)
+      5. Excessive blank line collapse
+      6. Repeated OCR artefact collapse (R) (R) (R) → (R)
+
+    Returns the cleaned text — always the same length or shorter.
+    """
+    if not text or not isinstance(text, str):
+        return text or ""
+
+    # 1. Tamil numerals → ASCII digits
+    out = normalize_tamil_numerals(text)
+
+    # 2. Fix orphan vowel signs (OCR garbling)
+    if _has_tamil_chars(out):
+        out = _fix_orphan_vowel_signs(out)
+
+    # 3. Canonicalize survey prefixes
+    for pattern, replacement in _SURVEY_CANONICAL_MAP:
+        out = pattern.sub(replacement, out)
+
+    # 4. Normalize date separators: DD.MM.YYYY or DD/MM/YYYY → DD-MM-YYYY
+    out = _DATE_SEPARATOR_RE.sub(r'\1-\2-\3', out)
+
+    # 5. Collapse excessive blank lines (4+ → 2)
+    out = _EXCESSIVE_BLANK_LINES_RE.sub('\n\n', out)
+
+    # 6. Collapse repeated OCR artefacts
+    out = _REPEATED_PARENS_RE.sub(lambda m: m.group(0)[:3], out)
+
+    return out

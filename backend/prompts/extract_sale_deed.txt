@@ -1,114 +1,274 @@
 You are an expert Tamil Nadu land document analyst. Extract all details from this Sale Deed document.
 
-A Sale Deed is a registered document that transfers property ownership from seller to buyer. It is registered at a Sub-Registrar Office (SRO) in Tamil Nadu.
+A Sale Deed (கிரயப் பத்திரம் / கிரய சாசனம்) is a registered document that transfers property ownership from seller to buyer. It is registered at a Sub-Registrar Office (SRO) in Tamil Nadu.
 
-Extract the following information:
-- document_number: Registration number
-- registration_date: Date of registration (YYYY-MM-DD)
-- sro: Sub-Registrar Office where registered
-- book_volume: Book number and volume if mentioned
+═══════════════════════════════════════════════════
+TAMIL SALE DEED STRUCTURE GUIDE
+═══════════════════════════════════════════════════
 
-SELLER DETAILS:
-- seller_names: Name(s) of seller(s) with father's/husband's name
-- seller_age: Age(s) of seller(s)
-- seller_address: Address of seller(s)
-- seller_aadhaar: Aadhaar number if mentioned (may be partially masked)
-- seller_pan: PAN number if mentioned
+A typical Tamil Nadu sale deed follows this structure:
 
-BUYER DETAILS:
-- buyer_names: Name(s) of buyer(s) with father's/husband's name  
-- buyer_age: Age(s) of buyer(s)
-- buyer_address: Address of buyer(s)
+PAGE 1 — STAMP PAPER:
+  - Non-judicial stamp paper with denomination (Rs. 25000, etc.)
+  - Stamp vendor details (e.g., "R. GOPINATH STAMP VENDOR")
+  - Document reference on stamp (e.g., "No: 12896 / E / 2010 / 5 CBE")
 
-PROPERTY DETAILS:
-- property_description: Full property description from schedule
-- survey_number: Survey number(s) with subdivisions
-- door_number: Door/plot number if applicable
-- village: Village name
-- taluk: Taluk name
-- district: District name
-- total_extent: Total extent with unit
-- boundaries: North, South, East, West boundaries
-- property_type: Residential/Agricultural/Commercial/Industrial
+PAGES 1-3 — SELLER & BUYER IDENTIFICATION:
+  The deed text typically reads:
+    "[Address] வசித்து வரும் [SELLER NAMES]... எழுதிக் கொடுத்த விவசாய பூமி கிரய சாசனம்"
+    Translation: "The sale deed for agricultural land written and given by [SELLERS] residing at [ADDRESS]"
+  
+  Then later:
+    "எழுதி வாங்குபவர் [BUYER NAMES]"
+    Translation: "The one who writes and takes = BUYER"
+
+  CRITICAL ROLE RULES:
+  - Text BEFORE "எழுதி வாங்குபவர்" or "வாங்குபவர்" → SELLERS (they "கொடுத்த" = gave)
+  - Text AFTER "எழுதி வாங்குபவர்" or "வாங்குபவர்" → BUYERS (they "வாங்கு" = take/buy)
+  - "எழுதிக் கொடுப்பவர்" / "கொடுப்பவர்" = SELLER (giver)
+  - "வசித்து வரும்" = "residing at" → what follows is a PERSON's address, NOT property location
+  - "கதவு எண்" = door number → this is a residential address indicator
+
+PAGES 3-5 — PROPERTY SCHEDULE (அட்டவணை / சொத்து விவரம்):
+  - Survey number: க.ச. (கணக்கெடுப்பு சர்வே) or S.F.No. / T.S.No. / R.S.No.
+  - கிராமம் = Village (PROPERTY location)
+  - தாலூக்கா / வட்டம் = Taluk
+  - மாவட்டம் = District
+  - பரப்பு = Extent / Area
+  - எல்லைகள் = Boundaries (North/South/East/West)
+
+PAGES 5-10 — RECITALS & OWNERSHIP CHAIN (எப்படிச் சொத்து வந்தது / சொத்து வரலாறு):
+  This section tells the STORY OF THE LAND — how the property passed through hands:
+  - "இந்தச் சொத்து ... பத்திரம் எழுதிக் கொடுத்து" = Previous deed transfer
+  - Each prior transfer mentions: previous owner, date, deed number, how they acquired it
+  - May trace 2-3 generations of ownership (grandparent → parent → seller)
+  - "கிரையம்" = purchased, "வாரிசு" / "உயில்" = inheritance, "பாகப்பிரிவினை" = partition, "தானம்" = gift
+  - Often includes the original purchase price and SRO where old deed was registered
+  
+  ENCUMBRANCE DECLARATION:
+  - "பாரமில்லை" / "எவ்விதமான பாரமும் இல்லை" = free from encumbrance
+  - "இந்தச் சொத்து எவ்வித ஈடுகட்டு ... இல்லை" = no mortgage/lien
+  
+  PAYMENT & POSSESSION:
+  - Payment mode: "காசோலை" (cheque), "வங்கி வரைவோலை" (DD), "NEFT", "RTGS", ரொக்கம் (cash)
+  - "ஒப்படைப்பு" / "கைவசம்" / "possession" = when possession was given
+  - "இன்றைய தேதியில் கைவசம் ஒப்படைத்தேன்" = possession given today
+
+LATER PAGES — SIGNATURES:
+  - "எழுதிக் கொடுப்பவர்" signatures = SELLERS signed here
+  - "எழுதி வாங்குபவர்" signatures = BUYERS signed here
+  - "சாட்சிகள்" = Witnesses
+
+LAST PAGES — REGISTRATION ENDORSEMENT:
+  - Registration number (e.g., R/Vadavalli/Book1/5909/2012)
+  - Registration date
+  - SRO details
+
+═══════════════════════════════════════════════════
+CRITICAL DISAMBIGUATION RULES
+═══════════════════════════════════════════════════
+
+1. DOCUMENT NUMBER vs SURVEY NUMBER:
+   - document_number = REGISTRATION number (format: R/SRO/Book/NNNN/YYYY or NNNN/YY)
+   - survey_number = LAND survey number (format: 317, 317/1A) — appears after க.ச. or S.F.No.
+   - These are COMPLETELY DIFFERENT numbers. Never put one in the other's field.
+
+2. PROPERTY VILLAGE vs RESIDENTIAL ADDRESS:
+   - property.village = the village where the LAND is located (near கிராமம் keyword, near survey numbers)
+   - Seller/buyer addresses are their HOME addresses (with கதவு எண்/door number, வசித்து வரும்/residing at)
+   - NEVER put a residential address in the village field
+
+3. SELLER vs BUYER IDENTIFICATION:
+   - The person(s) described BEFORE "எழுதி வாங்குபவர்" are SELLERS
+   - The person(s) described AFTER "எழுதி வாங்குபவர்" are BUYERS
+   - At the bottom/signature section: "எழுதிக் கொடுப்பவர்" = SELLER signatures, "வாங்குபவர்" = BUYER signatures
+
+4. REGISTRATION DATE:
+   - The actual registration date is from the deed execution (usually in the body text or endorsement)
+   - A "certified copy" date (if present) is when the COPY was issued — this is NOT the registration date
+   - Look for patterns like "2012-ம் வருடம் டிசம்பர் மாதம் 13-ம் தேதி" (= 13 December 2012)
+
+5. JOINT PARTIES (husband + wife / family members):
+   - Tamil deeds commonly list related sellers/buyers together:
+     "திரு. V. அருள்சிங் அவர்கள் மனைவி திருமதி. A. பொன்அரசி"
+     This means V. அருள்சிங் AND A. பொன்அரசி are BOTH sellers — list EACH as a separate entry.
+   - "மனைவி" (wife), "மகன்" (son), "மகள்" (daughter) between two names = BOTH are parties.
+   - Each person with a PAN number MUST be a separate seller[] or buyer[] entry.
+   - Pattern: "(2)" or "- (2)" after a name group indicates 2 sellers/buyers — count must match.
+   - At the signature pages, count the number of distinct signatures/thumb impressions to verify
+     you have extracted ALL parties.
+
+{preparse_hints}
+
+═══════════════════════════════════════════════════
+EXTRACTION FIELDS
+═══════════════════════════════════════════════════
+
+REGISTRATION DETAILS:
+- document_number: Registration number (e.g., "R/Vadavalli/Book1/5909/2012")
+- registration_date: Date of deed REGISTRATION at SRO (YYYY-MM-DD) — NOT certified copy date
+- execution_date: Date of deed EXECUTION/signing (YYYY-MM-DD) — may differ from registration date
+  Tamil pattern: "2012-ம் வருடம் டிசம்பர் மாதம் 13-ம் தேதி" = 2012-12-13
+  This is the date the deed was physically signed, often in the body text opening paragraph.
+- sro: Sub-Registrar Office name
+
+SELLER DETAILS (எழுதிக் கொடுப்பவர் / விற்பனையாளர்):
+- seller[].name: Seller name
+- seller[].father_name: Father/husband name (S/o, D/o, W/o markers)
+- seller[].age: Age if mentioned
+- seller[].address: Residential address
+- seller[].pan: PAN number if mentioned (format: ABCDE1234F)
+  IMPORTANT: If the deed says "திரு. X அவர்கள் மனைவி திருமதி. Y (PAN NO. XXXXX)",
+  then X and Y are BOTH sellers. Create a SEPARATE entry for each person.
+  Count the total sellers — if the deed says "(2)" that means 2 sellers must be listed.
+
+BUYER DETAILS (எழுதி வாங்குபவர் / வாங்குபவர்):
+- buyer[].name: Buyer name
+- buyer[].father_name: Father/husband name
+- buyer[].age: Age if mentioned
+- buyer[].address: Residential address
+- buyer[].pan: PAN number if mentioned
+  IMPORTANT: Same rule as sellers — each person with their own PAN is a SEPARATE buyer entry.
+  If the deed says "(1)" or "- (1)" that means 1 buyer; verify your count matches.
+
+PROPERTY DETAILS (from the property schedule / அட்டவணை):
+- property.survey_number: Survey number(s) from க.ச. / S.F.No. — NOT the document number
+- property.village: Village where the PROPERTY is located (கிராமம்)
+- property.taluk: Taluk name (தாலூக்கா / வட்டம்)
+- property.district: District name (மாவட்டம்)
+- property.extent: Total area with units
+- property.boundaries: North, South, East, West
+- property.property_type: Agricultural/Residential/Commercial/Industrial/Mixed/Unknown
 
 FINANCIAL DETAILS:
-- consideration_amount: Sale price in ₹
-- guideline_value: Government guideline value if mentioned
-- stamp_duty_paid: Stamp duty amount
-- registration_fee: Registration fee paid
-- tds_deducted: TDS amount if applicable
+- financials.consideration_amount: Sale price in ₹ (integer, no commas)
+  This is the TOTAL SALE PRICE. Look for:
+    - Stamp paper header: "ரூபாய் 5,67,92,000/-க்கு கிரயம்" → consideration = 56792000
+    - Body text: "விலை ரூ. X" or "கிரய தொகை ரூ. X"
+    - Property schedule table: total amount column
+  CRITICAL: If the pre-parse hints show a consideration_amount, USE that value.
+  Strip commas and produce a plain integer (e.g., 5,67,92,000 → 56792000). NEVER return 0
+  when a clear amount is visible on the stamp paper or in the deed text.
+- financials.guideline_value: Government guideline value (0 if not mentioned)
+- financials.stamp_duty: Stamp duty amount (0 if not mentioned)
+  Look for stamp paper denomination (e.g., Rs. 25000 on stamp paper header)
+- financials.registration_fee: Registration fee (0 if not mentioned)
 
-PREVIOUS OWNERSHIP:
-- previous_document_number: Previous sale deed or source document number
-- previous_document_date: Date of previous document
-- previous_owner: Name of previous owner before seller
-- how_seller_acquired: How seller acquired the property (sale/gift/inheritance/partition)
+PREVIOUS OWNERSHIP (immediate previous owner — single object for backward compatibility):
+- previous_ownership.document_number: Previous deed number
+- previous_ownership.document_date: Previous deed date (YYYY-MM-DD)
+- previous_ownership.previous_owner: Name of previous owner (before current seller)
+- previous_ownership.acquisition_mode: Sale/Gift/Inheritance/Partition/Settlement/Unknown
+
+OWNERSHIP HISTORY (FULL chain from the deed recitals — list all prior transfers):
+  This is the STORY OF THE LAND. Extract every ownership link mentioned in the recitals.
+  Tamil deeds often trace 2-3 generations. Extract each link as an object:
+- ownership_history[].owner: The person who held the property at that stage
+- ownership_history[].acquired_from: Who they got it from (previous holder)
+- ownership_history[].acquisition_mode: Sale/Gift/Inheritance/Partition/Settlement/Unknown
+- ownership_history[].document_number: The deed number for that transfer
+- ownership_history[].document_date: Date of that transfer (YYYY-MM-DD)
+- ownership_history[].remarks: Any notable details (e.g., "Original patta holder", "Government grant")
+  Sort chronologically — OLDEST transfer first, most recent last.
+  The LAST entry should be the seller acquiring the property (matching previous_ownership).
+  IMPORTANT:
+  - acquired_from MUST be filled for EVERY entry. Trace the chain carefully:
+    If M. ஆறுமுகம் acquired via deed 89/1992 FROM M. மருதகுட்டி, then acquired_from = "M. மருதகுட்டி"
+  - Do NOT include the current BUYERS as ownership_history entries — they are the destination.
+  - Only include PAST ownership transfers that show how the property reached the current seller.
+
+PROPERTY DESCRIPTION (the verbatim property schedule / அட்டவணை text):
+- property_description: Copy the complete property schedule section as-is from the deed.
+  Include the exact Tamil/English text describing the property — survey number, village,
+  boundaries, extent, classification. This is the legal description that matters for verification.
+  If very long, provide the first 500 characters.
+
+PAYMENT & POSSESSION:
+- payment_mode: How the consideration was paid — "Cash" / "Cheque" / "Demand Draft" / "Bank Transfer (NEFT/RTGS)" / "Mixed" / ""
+  Tamil: ரொக்கம் (cash), காசோலை (cheque), வங்கி வரைவோலை (DD), NEFT/RTGS
+- possession_date: When physical possession was/will be given (YYYY-MM-DD or description like "on execution")
+- encumbrance_declaration: The seller's declaration about encumbrances. Quote the key phrase:
+  e.g., "Property declared free from all encumbrances, mortgages, charges, liens, and attachments"
+  Tamil: "எவ்விதமான பாரமும் இல்லை"
 
 WITNESSES:
-- witnesses: List of witness names
+- witnesses: List of witness names (from சாட்சிகள் section)
+  Witnesses appear near the bottom of the deed, often after "இன்னொரெண்டு நிருபித்தவர்கள்" or "சாட்சிகள்".
+  They may be HANDWRITTEN and partially illegible. Best practices:
+  - Prefer the PRINTED version of witness names (often earlier in the deed) over handwritten signatures.
+  - If a name is partially illegible, extract what you can and note "[partially illegible]".
+  - Do NOT include garbled OCR character sequences as witness names.
+  - Cross-reference: witness names sometimes appear in printed text with full details (S/o, address).
 
-SPECIAL CLAUSES:
-- special_conditions: Any special conditions, restrictions, or covenants
-- power_of_attorney: If sold via POA, details of POA
-- joint_development: If part of JDA, details
+OTHER:
+- special_conditions: Special conditions or restrictions
+- power_of_attorney: POA details if applicable
+- remarks: Any additional notes
 
-TAMIL-SPECIFIC EXTRACTION RULES:
-- Tamil numerals: ௧=1 ௨=2 ௩=3 ௪=4 ௫=5 ௬=6 ௭=7 ௮=8 ௯=9 ௰=10 ௱=100 ௲=1000. Convert to Arabic numerals in output.
-- Tamil extent units: எக்கர் (acre), சென்ட் (cent), ஹெக்டேர் (hectare), சதுர அடி (sq.ft), குழி (kuzhi ≈ 144 sq.ft). Transliterate to English.
-- Multi-party names: If multiple sellers or buyers are listed (joined by "மற்றும்" / "and" / ","), list EACH person as a separate entry in the seller/buyer array.
-- Survey type prefixes: Preserve S.F.No./T.S.No./R.S.No./O.S.No./N.S.No. prefix exactly. Do NOT strip it.
-- Common Tamil terms: விற்பனையாளர் (seller), வாங்குபவர் (buyer), ஆவண எண் (document number), தேதி (date), சொத்து விவரம் (property description), எல்லைகள் (boundaries).
-- Father/husband name markers: S/o (மகன்), D/o (மகள்), W/o (மனைவி) — preserve these as-is.
+TAMIL-SPECIFIC RULES:
+- Tamil numerals: ௧=1 ௨=2 ௩=3 ௪=4 ௫=5 ௬=6 ௭=7 ௮=8 ௯=9. Convert to Arabic.
+- Tamil units: எக்கர் (acre), சென்ட் (cent), ஹெக்டேர் (hectare), சதுர அடி (sq.ft). Transliterate.
+- Multiple parties joined by "மற்றும்" / "and" / "," → list each as separate entry.
+- Survey prefixes: Preserve S.F.No./T.S.No./R.S.No./O.S.No./N.S.No. exactly.
+- Relation markers: S/o (மகன்), D/o (மகள்), W/o (மனைவி) — preserve as-is in father_name.
 
-Return ONLY valid JSON:
+Return ONLY valid JSON matching this structure:
 {
-    "document_number": "1234/2024",
-    "registration_date": "2024-01-15",
-    "sro": "Tambaram",
+    "document_number": "R/SRO/Book1/NNNN/YYYY",
+    "registration_date": "YYYY-MM-DD",
+    "execution_date": "YYYY-MM-DD",
+    "sro": "SRO Name",
     "seller": [
-        {
-            "name": "Seller Name",
-            "father_name": "Father Name",
-            "age": 45,
-            "address": "Address"
-        }
+        {"name": "...", "father_name": "S/o ...", "age": "...", "address": "...", "pan": ""}
     ],
     "buyer": [
-        {
-            "name": "Buyer Name",
-            "father_name": "Father Name",
-            "age": 35,
-            "address": "Address"
-        }
+        {"name": "...", "father_name": "S/o ...", "age": "...", "address": "...", "pan": ""}
     ],
     "property": {
-        "survey_number": "123/4A",
-        "village": "Village",
-        "taluk": "Taluk",
-        "district": "District",
-        "extent": "2400 sq.ft",
-        "boundaries": {
-            "north": "...",
-            "south": "...",
-            "east": "...",
-            "west": "..."
-        },
-        "property_type": "Residential"
+        "survey_number": "317/1A",
+        "village": "Village Name",
+        "taluk": "Taluk Name",
+        "district": "District Name",
+        "extent": "2.5 acres",
+        "boundaries": {"north": "...", "south": "...", "east": "...", "west": "..."},
+        "property_type": "Agricultural"
     },
+    "property_description": "கோயமுத்தூர் ரிசிடு, ஜாயிண்ட் 2 சப்ரிசிடு, கோயமுத்தூர் வடக்கு தாலூக்கா, சோமையம்பாளையம் கிராமம், க.ச. 317 நெ. P.A. 1.14½ ...",
     "financials": {
         "consideration_amount": 5000000,
-        "guideline_value": 4800000,
+        "guideline_value": 0,
         "stamp_duty": 350000,
         "registration_fee": 50000
     },
+    "payment_mode": "Bank Transfer (NEFT/RTGS)",
     "previous_ownership": {
-        "document_number": "5678/2020",
-        "document_date": "2020-06-15",
-        "previous_owner": "Previous Owner Name",
+        "document_number": "1234/1992",
+        "document_date": "1992-01-20",
+        "previous_owner": "M. Aarumugam",
         "acquisition_mode": "Sale"
     },
+    "ownership_history": [
+        {
+            "owner": "M. Aarumugam S/o Maruthakutti Gounder",
+            "acquired_from": "Government patta",
+            "acquisition_mode": "Settlement",
+            "document_number": "",
+            "document_date": "",
+            "remarks": "Original patta holder"
+        },
+        {
+            "owner": "N. Radhakrishnan & R. Rani",
+            "acquired_from": "M. Aarumugam",
+            "acquisition_mode": "Sale",
+            "document_number": "1234/1992",
+            "document_date": "1992-01-20",
+            "remarks": ""
+        }
+    ],
+    "encumbrance_declaration": "Property declared free from all encumbrances, mortgages, charges, liens",
+    "possession_date": "2012-12-13",
     "witnesses": ["Witness 1", "Witness 2"],
     "special_conditions": [],
-    "power_of_attorney": null,
+    "power_of_attorney": "",
     "remarks": ""
 }

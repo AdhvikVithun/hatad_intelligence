@@ -1,4 +1,6 @@
-﻿import { useAnalysis } from './hooks/useAnalysis';
+﻿import { useState, useCallback } from 'react';
+import { useAnalysis } from './hooks/useAnalysis';
+import { Bootloader } from './components/boot/Bootloader';
 import { TopBar } from './components/layout/TopBar';
 import { Sidebar } from './components/layout/Sidebar';
 import { TabBar } from './components/layout/TabBar';
@@ -20,9 +22,17 @@ import { ErrorBoundary } from './components/common/ErrorBoundary';
 import './components/common/ErrorBoundary.css';
 
 export default function App() {
+  const [booted, setBooted] = useState(false);
+  const handleBootReady = useCallback(() => setBooted(true), []);
+
   const a = useAnalysis();
 
   const showWelcome = !a.session && !a.processing && a.progress.length === 0 && !['log'].includes(a.activeTab);
+
+  /* ── Bootloader gate ── */
+  if (!booted) {
+    return <Bootloader onReady={handleBootReady} />;
+  }
 
   return (
     <div className="app-container">

@@ -79,6 +79,32 @@ EXAMPLE 3 — LIS_PENDENS (WARNING):
 - Each WARNING: -1 point
 - Start from 100
 
+═══ COMMON MISTAKES TO AVOID (ANTI-EXAMPLES) ═══
+
+WRONG — Flagging SRO name ≠ taluk name as an EC issue:
+  "The EC was obtained from Vadavalli SRO but the property is in Coimbatore taluk."
+  WHY THIS IS WRONG: SROs are named after the locality, not the taluk. Vadavalli SRO is within Coimbatore taluk. This is NOT a discrepancy. Only flag if the SRO jurisdiction is genuinely outside the taluk boundaries.
+
+WRONG — Flagging two sale deeds on different dates as "multiple sales":
+  "Two sale deeds found: Doc 1001/2015 (A→B) and Doc 4502/2022 (B→C). Multiple buyers detected."
+  WHY THIS IS WRONG: Sequential transfers (A→B, then B→C) are a NORMAL chain of title. MULTIPLE_SALES means selling the SAME property to DIFFERENT people at approximately the SAME time without the first buyer's involvement.
+
+WRONG — Marking a check as FAIL without verifying via tool calls:
+  "No mortgage entries found [based on reviewing the extracted data]."
+  WHY THIS IS WRONG: Always use search_documents to verify — extracted data may be incomplete.
+
+═══ TOOL FAILURE HANDLING ═══
+
+If search_documents returns 0 results for a query:
+  - State: "No matching text found in uploaded documents for [query]."
+  - Do NOT fabricate quotes or invent page numbers.
+  - Base your status on other available evidence (Memory Bank facts, extracted data).
+  - If no evidence exists at all, set status to NOT_APPLICABLE with explanation.
+
+If query_knowledge_base returns an error:
+  - Fall back to the extracted document data provided in the prompt.
+  - Note in evidence: "Knowledge base unavailable; analysis based on extracted data only."
+
 Return ONLY valid JSON:
 {
     "group": "ec_only",

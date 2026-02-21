@@ -40,7 +40,7 @@ from app.pipeline.tools import (OLLAMA_TOOLS, set_rag_store, clear_rag_store, se
                                 lookup_guideline_value, verify_sro_jurisdiction, check_document_age)
 from app.pipeline.deterministic import run_deterministic_checks
 from app.pipeline.self_reflection import run_self_reflection, apply_amendments
-from app.pipeline.utils import split_survey_numbers, normalize_survey_number
+from app.pipeline.utils import split_survey_numbers, normalize_survey_number, normalize_raw_ocr_text, classify_ec_transactions_by_risk
 from app.pipeline.identity import IdentityResolver, _ROLE_LABELS as _ID_ROLE_LABELS
 
 logger = logging.getLogger(__name__)
@@ -55,6 +55,10 @@ EXTRACTORS = {
         schema=EXTRACT_PATTA_SCHEMA,
     ),
     "CHITTA": TextPrimaryExtractor(
+        text_extractor=PattaExtractor(),
+        schema=EXTRACT_PATTA_SCHEMA,
+    ),
+    "A_REGISTER": TextPrimaryExtractor(
         text_extractor=PattaExtractor(),
         schema=EXTRACT_PATTA_SCHEMA,
     ),
@@ -86,20 +90,27 @@ VERIFY_GROUPS = [
     },
     {
         "id": 3,
-        "name": "Cross-Document Consistency",
+        "name": "Cross-Document Property Checks",
         "prompt_file": "verify_group3_crossdoc.txt",
-        "needs": ["EC", "PATTA", "CHITTA", "SALE_DEED"],
-        "check_count": 12,
+        "needs": ["EC", "PATTA", "CHITTA", "A_REGISTER", "SALE_DEED"],
+        "check_count": 6,
     },
     {
         "id": 4,
+        "name": "Cross-Document Compliance Checks",
+        "prompt_file": "verify_group3b_compliance.txt",
+        "needs": ["EC", "PATTA", "CHITTA", "A_REGISTER", "SALE_DEED"],
+        "check_count": 6,
+    },
+    {
+        "id": 5,
         "name": "Chain & Pattern Analysis",
         "prompt_file": "verify_group4_chain.txt",
         "needs": ["EC", "SALE_DEED"],
         "check_count": 10,
     },
 ]
-# Group 5 (meta) is special — it receives results from groups 1-4, not doc data
+# Group 6 (meta) is special — it receives results from groups 1-5, not doc data
 
 
 class AnalysisSession:
@@ -224,6 +235,10 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
         llm_updates.append(entry)
 
     try:
+        # Initialise variables used in the 'except' cleanup block so they
+        # exist even when the pipeline fails before assigning them.
+        rag_store = None
+
         # ═══════════════════════════════════════════
         # STAGE 1: TEXT EXTRACTION
         # ═══════════════════════════════════════════
@@ -335,6 +350,66 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                          f"(confidence: {classification.get('confidence', 0):.0%})")
 
         # ═══════════════════════════════════════════
+        # STAGE 2.5: PRE-EXTRACTION RAG INDEX (raw OCR text)
+        # Index raw OCR pages before extraction so EC extractor can
+        # query header context for later chunks.  Re-indexed with
+        # structured output post-extraction for verification.
+        # ═══════════════════════════════════════════
+        pre_rag_store = None
+        pre_embed_fn = None
+        if RAG_ENABLED:
+            from app.config import RAG_PRE_INDEX
+            if RAG_PRE_INDEX:
+                try:
+                    from app.pipeline.rag_store import RAGStore
+                    from app.pipeline.llm_client import get_embeddings
+
+                    pre_rag_store = RAGStore(session.session_id)
+                    pre_embed_fn = get_embeddings
+                    pre_total = 0
+                    for fname, tdata in extracted_texts.items():
+                        raw_pages = tdata.get("pages", [])
+                        if raw_pages:
+                            cnt = await pre_rag_store.index_document(
+                                filename=fname, pages=raw_pages,
+                                embed_fn=get_embeddings,
+                            )
+                            pre_total += cnt
+                    if pre_total > 0:
+                        yield _update(session, "knowledge",
+                                     f"Pre-extraction RAG: {pre_total} raw OCR chunks indexed")
+                    logger.info(f"Pre-extraction RAG: {pre_total} chunks indexed")
+                except Exception as e:
+                    logger.warning(f"Pre-extraction RAG indexing failed (non-fatal): {e}")
+                    pre_rag_store = None
+                    pre_embed_fn = None
+
+        # ═══════════════════════════════════════════
+        # STAGE 2.7: PRE-EXTRACTION TEXT NORMALIZATION
+        # Deterministic cleanup of raw OCR text BEFORE the LLM sees it.
+        # Reduces hallucinations by standardising Tamil numerals,
+        # survey prefixes, dates, and fixing garbled Tamil vowel signs.
+        # ═══════════════════════════════════════════
+        norm_count = 0
+        for fname, tdata in extracted_texts.items():
+            raw = tdata.get("full_text", "")
+            if not raw:
+                continue
+            cleaned = normalize_raw_ocr_text(raw)
+            if cleaned != raw:
+                tdata["full_text"] = cleaned
+                # Also normalize individual page texts
+                for page in tdata.get("pages", []):
+                    page_text = page.get("text", "")
+                    if page_text:
+                        page["text"] = normalize_raw_ocr_text(page_text)
+                norm_count += 1
+        if norm_count:
+            yield _update(session, "data_extraction",
+                         f"Pre-extraction normalization: cleaned {norm_count} document(s) "
+                         f"(Tamil numerals, survey prefixes, dates, OCR artefacts)")
+
+        # ═══════════════════════════════════════════
         # STAGE 3: STRUCTURED DATA EXTRACTION
         # Text-only architecture: Sarvam provides OCR text,
         # GPT-OSS does all extraction/reasoning from that text.
@@ -350,9 +425,16 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
             yield _update(session, "data_extraction",
                          f"Analyzing {filename} as {doc_type} (GPT-OSS)...")
             try:
+                # Pass pre-extraction RAG store to EC extractor for header injection
+                extra_kwargs = {}
+                if doc_type == "EC" and pre_rag_store and pre_embed_fn:
+                    extra_kwargs["rag_store"] = pre_rag_store
+                    extra_kwargs["embed_fn"] = pre_embed_fn
+
                 extracted = await extractor.extract(
                     text_data, on_progress=_llm_progress,
                     filename=filename, file_path=file_path_map.get(filename),
+                    **extra_kwargs,
                 )
                 # Flush progress events immediately (fixes speed=0.0 display)
                 for upd in llm_updates:
@@ -385,6 +467,29 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                 yield _update(session, "data_extraction",
                              f"Warning: Could not fully extract {filename}: {e}")
 
+        # ── Extraction completeness audit ──
+        for filename, data in session.extracted_data.items():
+            if data.get("document_type") == "EC" and data.get("data"):
+                ed = data["data"]
+                declared = ed.get("total_entries_found", 0)
+                actual = len(ed.get("transactions", []))
+                if declared and actual and actual < declared * 0.9:
+                    logger.warning(
+                        f"[{filename}] Extraction incomplete: "
+                        f"declared={declared}, extracted={actual}"
+                    )
+                    yield _update(session, "data_extraction",
+                                 f"\u26a0 {filename}: Extracted {actual}/{declared} entries "
+                                 f"({actual/declared:.0%}). Some transactions may be missing.", {
+                                     "type": "extraction_completeness",
+                                     "declared": declared,
+                                     "actual": actual,
+                                 })
+                elif declared and actual:
+                    yield _update(session, "data_extraction",
+                                 f"{filename}: {actual}/{declared} entries extracted "
+                                 f"({actual/declared:.0%} complete)")
+
         # ═══════════════════════════════════════════
         # STAGE 3.5a: KNOWLEDGE — Memory & Document Knowledge Base
         # ═══════════════════════════════════════════
@@ -400,6 +505,12 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                 fact_count = memory_bank.ingest_document(filename, doc_type, content)
                 yield _update(session, "knowledge",
                              f"Memory: {filename} → {fact_count} facts extracted")
+                # Store risk classification for EC documents
+                if doc_type == "EC" and isinstance(content, dict):
+                    risk_count = memory_bank.ingest_risk_classification(filename, content)
+                    if risk_count:
+                        yield _update(session, "knowledge",
+                                     f"Memory: {filename} → {risk_count} risk facts stored")
 
         # Run conflict detection
         conflicts = memory_bank.detect_conflicts()
@@ -437,23 +548,29 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
         yield _update(session, "identity", "Resolving person identities across documents...")
 
         identity_resolver = IdentityResolver()
-        mention_count = identity_resolver.collect_mentions(session.extracted_data)
-        identity_clusters = identity_resolver.resolve()
-        session.identity_clusters = identity_resolver.to_dict()
+        try:
+            mention_count = identity_resolver.collect_mentions(session.extracted_data)
+            identity_clusters = identity_resolver.resolve()
+            session.identity_clusters = identity_resolver.to_dict()
 
-        summary = identity_resolver.get_summary()
-        yield _update(session, "identity", f"Identity resolution: {summary}", {
-            "type": "identity_resolved",
-            "cluster_count": len(identity_clusters),
-            "mention_count": mention_count,
-        })
-        for cluster in identity_clusters:
-            roles_str = ", ".join(sorted(_ID_ROLE_LABELS.get(r, r)
-                                         for r in cluster.roles))
+            summary = identity_resolver.get_summary()
+            yield _update(session, "identity", f"Identity resolution: {summary}", {
+                "type": "identity_resolved",
+                "cluster_count": len(identity_clusters),
+                "mention_count": mention_count,
+            })
+            for cluster in identity_clusters:
+                roles_str = ", ".join(sorted(_ID_ROLE_LABELS.get(r, r)
+                                             for r in cluster.roles))
+                yield _update(session, "identity",
+                             f"  {cluster.cluster_id}: \"{cluster.consensus_name}\" "
+                             f"({len(cluster.mentions)} mentions, "
+                             f"confidence: {cluster.confidence:.0%}) — {roles_str}")
+        except Exception as e:
+            logger.error(f"Identity resolution failed: {e}")
+            session.identity_clusters = None
             yield _update(session, "identity",
-                         f"  {cluster.cluster_id}: \"{cluster.consensus_name}\" "
-                         f"({len(cluster.mentions)} mentions, "
-                         f"confidence: {cluster.confidence:.0%}) — {roles_str}")
+                         f"Identity resolution failed (non-fatal): {str(e)[:100]}")
 
         # ═══════════════════════════════════════════
         # STAGE 3.5b: DOCUMENT SUMMARIZATION
@@ -462,6 +579,8 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                      "Creating compact summaries for downstream analysis...", save=True)
 
         summaries = {}  # filename → compact dict
+        # Separate compact (skip) from needs-summarization for parallel dispatch
+        needs_summarization: list[tuple[str, str, dict]] = []  # (filename, doc_type, content)
         for filename, data in session.extracted_data.items():
             doc_type = data.get("document_type", "OTHER")
             content = data.get("data")
@@ -469,34 +588,42 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                 continue
 
             # Skip LLM summarization for already-compact outputs
-            extraction_method = content.get("_extraction_method", "") if isinstance(content, dict) else ""
             content_size = len(json.dumps(content, default=str)) if isinstance(content, dict) else 0
             if content_size < 2000:
                 summaries[filename] = content
                 yield _update(session, "summarization",
                              f"{filename}: extraction output is already compact, skipping summarization")
-                continue
+            else:
+                needs_summarization.append((filename, doc_type, content))
 
-            try:
-                summary = await summarize_document(doc_type, content, on_progress=_llm_progress)
-                for upd in llm_updates:
-                    yield upd
-                llm_updates.clear()
-                summaries[filename] = summary
-                is_summarized = summary.get("_is_summary", False)
-                if is_summarized:
-                    orig_json_len = len(json.dumps(content, default=str))
+        # Parallelize summarization — each LLM call is independent
+        if needs_summarization:
+            async def _summarize_one(fname: str, dtype: str, cont: dict):
+                try:
+                    return fname, await summarize_document(dtype, cont, on_progress=_llm_progress), cont
+                except Exception as exc:
+                    logger.warning(f"Summarization failed for {fname}: {exc}")
+                    return fname, cont, cont  # fallback to raw
+
+            tasks = [_summarize_one(fn, dt, ct) for fn, dt, ct in needs_summarization]
+            results = await asyncio.gather(*tasks)
+
+            for upd in llm_updates:
+                yield upd
+            llm_updates.clear()
+
+            for fname, summary, original_content in results:
+                summaries[fname] = summary
+                is_summarized = isinstance(summary, dict) and summary.get("_is_summary", False)
+                is_compacted = isinstance(summary, dict) and summary.get("_is_compacted", False)
+                if is_summarized or is_compacted:
+                    orig_json_len = len(json.dumps(original_content, default=str))
                     summ_json_len = len(json.dumps(summary, default=str))
                     yield _update(session, "summarization",
-                                 f"{filename}: summarized {orig_json_len:,} → {summ_json_len:,} chars")
+                                 f"{fname}: summarized {orig_json_len:,} → {summ_json_len:,} chars")
                 else:
                     yield _update(session, "summarization",
-                                 f"{filename}: already compact, no summarization needed")
-            except Exception as e:
-                logger.warning(f"Summarization failed for {filename}: {e}")
-                summaries[filename] = content  # fall back to raw
-                yield _update(session, "summarization",
-                             f"Warning: could not summarize {filename}, using raw data")
+                                 f"{fname}: already compact, no summarization needed")
 
         # Phase 2: Knowledge — index document text for semantic search
         # For vision-extracted docs, we flatten the structured extraction output
@@ -504,6 +631,16 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
         # For EC docs we keep using pdfplumber/OCR text (already enhanced).
         rag_store = None
         if RAG_ENABLED:
+            # Clean up pre-extraction RAG chunks — they served their purpose
+            # during EC header injection and would pollute the structured index.
+            if pre_rag_store is not None:
+                try:
+                    pre_rag_store.cleanup()
+                    logger.info("Pre-extraction RAG: cleaned up raw OCR chunks")
+                except Exception:
+                    pass  # non-fatal
+                pre_rag_store = None
+
             yield _update(session, "knowledge",
                          "Phase 2: Indexing document text (Knowledge)...")
             try:
@@ -539,6 +676,32 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                     yield _update(session, "knowledge",
                                  f"Knowledge: {filename} → {chunk_count} chunks indexed ({source})")
 
+                    # ── Transaction-aware RAG for EC documents ──────────
+                    # Index each EC transaction as a separate semantic chunk
+                    # so verification can retrieve specific transactions by type.
+                    if (
+                        doc_type == "EC"
+                        and extraction_data
+                        and isinstance(extraction_data, dict)
+                        and extraction_data.get("transactions")
+                    ):
+                        txn_count = await rag_store.index_transactions(
+                            filename=filename,
+                            transactions=extraction_data["transactions"],
+                            embed_fn=get_embeddings,
+                            ec_header={
+                                "ec_number": extraction_data.get("ec_number"),
+                                "property_description": extraction_data.get("property_description"),
+                                "village": extraction_data.get("village"),
+                                "taluk": extraction_data.get("taluk"),
+                                "period_from": extraction_data.get("period_from"),
+                                "period_to": extraction_data.get("period_to"),
+                            },
+                        )
+                        total_chunks += txn_count
+                        yield _update(session, "knowledge",
+                                     f"Knowledge: {filename} → {txn_count} transaction chunks indexed")
+
                 # Register with tools module so search_documents can use it
                 set_rag_store(rag_store, embed_fn=get_embeddings)
 
@@ -562,8 +725,9 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
         # STAGE 4: MULTI-PASS VERIFICATION & FRAUD DETECTION
         # ═══════════════════════════════════════════
         total_checks = sum(g["check_count"] for g in VERIFY_GROUPS) + 2  # +2 for meta group
+        total_passes = len(VERIFY_GROUPS) + 1  # +1 for meta group
         yield _update(session, "verification",
-                     f"Running {total_checks}-point verification in {len(VERIFY_GROUPS) + 1} passes...", save=True)
+                     f"Running {total_checks}-point verification in {total_passes} passes...", save=True)
 
         # Build a lookup: doc_type → list of (filename, data)
         docs_by_type: dict[str, list[tuple[str, dict]]] = {}
@@ -609,7 +773,7 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
             if not relevant_docs:
                 # No relevant documents → skip this group, mark checks as N/A
                 yield _update(session, "verification",
-                             f"Pass {gid}/5: Skipped — no {'/'.join(needed_types)} documents")
+                             f"Pass {gid}/{total_passes}: Skipped — no {'/'.join(needed_types)} documents")
                 na_checks = [{
                     "rule_code": f"GROUP{gid}_SKIPPED",
                     "rule_name": f"{gname} — Skipped",
@@ -625,14 +789,14 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                 continue
 
             # Group 3 (cross-document) requires ≥2 distinct doc types to be meaningful
-            if gid == 3:
+            if gid in (3, 4):  # Both cross-document groups need ≥2 doc types
                 relevant_types = {dtype for dtype in needed_types if docs_by_type.get(dtype)}
                 if len(relevant_types) < 2:
                     yield _update(session, "verification",
-                                 f"Pass {gid}/5: Skipped — only {next(iter(relevant_types))} available, "
+                                 f"Pass {gid}/{total_passes}: Skipped — only {next(iter(relevant_types))} available, "
                                  f"cross-document checks need ≥2 doc types")
                     na_checks = [{
-                        "rule_code": "GROUP3_SKIPPED",
+                        "rule_code": f"GROUP{gid}_SKIPPED",
                         "rule_name": f"{gname} — Skipped (single doc type)",
                         "severity": "INFO",
                         "status": "INFO",
@@ -641,19 +805,19 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                                        f"document types to compare.",
                         "recommendation": "Provide additional document types (EC, Patta, Sale Deed) for cross-checks.",
                     }]
-                    group_results[gid] = {"group": "group3", "checks": na_checks}
+                    group_results[gid] = {"group": f"group{gid}", "checks": na_checks}
                     continue
 
-            # Group 4 (chain & pattern) requires SALE_DEED for transaction analysis
-            if gid == 4:
+            # Group 5 (chain & pattern) requires SALE_DEED for transaction analysis
+            if gid == 5:
                 relevant_types = {dtype for dtype in needed_types if docs_by_type.get(dtype)}
                 if "SALE_DEED" not in relevant_types:
                     avail = ", ".join(sorted(relevant_types)) or "none"
                     yield _update(session, "verification",
-                                 f"Pass {gid}/5: Skipped — no SALE_DEED, "
+                                 f"Pass {gid}/{total_passes}: Skipped — no SALE_DEED, "
                                  f"chain & pattern analysis requires sale transaction data")
                     na_checks = [{
-                        "rule_code": "GROUP4_SKIPPED",
+                        "rule_code": "GROUP5_SKIPPED",
                         "rule_name": f"{gname} — Skipped (no Sale Deed)",
                         "severity": "INFO",
                         "status": "INFO",
@@ -662,7 +826,7 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                                        f"sale transaction data to analyse.",
                         "recommendation": "Provide a Sale Deed document for chain & pattern verification.",
                     }]
-                    group_results[gid] = {"group": "group4", "checks": na_checks}
+                    group_results[gid] = {"group": "group5", "checks": na_checks}
                     continue
 
             doc_input = "\n\n".join(relevant_docs)
@@ -671,8 +835,23 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                 doc_input_with_mb += f"\n\n{precomputed_tools_block}"
             # Inject identity resolution context for groups 3 & 4
             identity_context = identity_resolver.get_llm_context()
-            if identity_context and gid in (3, 4):
+            if identity_context and gid in (3, 4, 5):
                 doc_input_with_mb += f"\n\n{identity_context}"
+
+            # ── Transaction risk classification for EC groups ──────────
+            # Tells the LLM which transactions are critical (encumbrances,
+            # judicial) vs routine (administrative), so it focuses analysis.
+            if gid in (1, 5) and "EC" in needed_types:
+                for _dtype, _docs in docs_by_type.items():
+                    if _dtype == "EC":
+                        for _fname, _content in _docs:
+                            if isinstance(_content, dict):
+                                risk_block = classify_ec_transactions_by_risk(_content)
+                                if risk_block:
+                                    doc_input_with_mb += f"\n\n{risk_block}"
+                                    break
+                        break
+
             system_prompt = (PROMPTS_DIR / group["prompt_file"]).read_text(encoding="utf-8")
 
             # Enable tools for ALL groups — knowledge base is always available,
@@ -698,9 +877,13 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                         2: ["sale deed consideration stamp duty", "power of attorney boundaries extent",
                             "stamp duty registration fee paid", "power of attorney authorization",
                             "boundaries north south east west"],
-                        3: ["survey number mismatch", "owner name cross-check patta EC", "extent area discrepancy",
-                            "pattadar name chitta", "extent area hectare acre", "survey subdivision number"],
-                        4: ["rapid flipping price anomaly", "broken chain seller buyer", "age fraud minor",
+                        3: ["survey number mismatch", "owner name cross-check patta EC",
+                            "pattadar name chitta", "SRO jurisdiction", "boundary north south east west",
+                            "patta mutation current owner", "road access boundary"],
+                        4: ["trust wakf temple restricted land", "ceiling surplus land holding acres",
+                            "NA conversion agricultural residential", "tax arrears revenue",
+                            "encroachment poramboke waterbody", "agricultural zone classification"],
+                        5: ["rapid flipping price anomaly", "broken chain seller buyer", "age fraud minor",
                             "sale price market value", "consecutive sale transactions", "minor age seller buyer"],
                     }
                     search_queries.extend(_GROUP_QUERIES.get(gid, []))
@@ -710,10 +893,10 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
 
                     all_chunks = []
                     seen_chunk_ids = set()
-                    for sq_emb in query_embeddings:
+                    for sq_text, sq_emb in zip(search_queries, query_embeddings):
                         if not sq_emb or all(v == 0.0 for v in sq_emb[:5]):
                             continue
-                        chunks = rag_store.query_sync(sq_emb, n_results=6)
+                        chunks = rag_store.query_sync(sq_emb, n_results=6, query_text=sq_text)
                         for chunk in chunks:
                             chunk_id = f"{chunk.filename}_p{chunk.page_number}_c{chunk.chunk_index}"
                             if chunk_id not in seen_chunk_ids:
@@ -750,7 +933,7 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
 
             group_inputs[gid] = (doc_input_with_mb, system_prompt, group_tools, rag_hint, rag_evidence_block)
 
-        # ── Run groups 1-4 in parallel (with concurrency limit) ──
+        # ── Run groups 1-5 in parallel (with concurrency limit) ──
         # Progress updates are written directly to session.progress (with
         # periodic saves) so the SSE polling stream can report them in
         # real-time.  A lock serialises writes to avoid interleaved JSON.
@@ -779,11 +962,11 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                 await _live_update(stage, message, detail)
 
             await _live_update("verification",
-                       f"Pass {gid}/5: {gname} ({group['check_count']} checks)...",
+                       f"Pass {gid}/{total_passes}: {gname} ({group['check_count']} checks)...",
                        save=True)
 
             await _live_update("llm_info",
-                       f"Pass {gid}/5: Sending {len(doc_input_with_mb):,} chars to LLM", {
+                       f"Pass {gid}/{total_passes}: Sending {len(doc_input_with_mb):,} chars to LLM", {
                            "type": "llm_info",
                            "data_size": len(doc_input_with_mb),
                            "group": gid,
@@ -839,7 +1022,7 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                     }]
                     group_results[gid] = {"group": f"group{gid}", "checks": err_checks}
                     await _live_update("verification",
-                               f"Pass {gid}/5: Partial — LLM returned fallback", {
+                               f"Pass {gid}/{total_passes}: Partial — LLM returned fallback", {
                                    "type": "verify_group_done",
                                    "group_id": gid,
                                    "group_name": gname,
@@ -869,7 +1052,7 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                 deduction = result.get("group_score_deduction", 0)
 
                 await _live_update("verification",
-                           f"Pass {gid}/5 done: {passed} pass, {failed} fail, "
+                           f"Pass {gid}/{total_passes} done: {passed} pass, {failed} fail, "
                            f"{warns} warn (deduction: -{deduction})", {
                                "type": "verify_group_done",
                                "group_id": gid,
@@ -888,7 +1071,7 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                 retry_result = None
                 try:
                     await _live_update("verification",
-                               f"Pass {gid}/5: Retrying with simplified mode...",
+                               f"Pass {gid}/{total_passes}: Retrying with simplified mode...",
                                save=True)
                     async with semaphore:
                         retry_result = await call_llm(
@@ -926,7 +1109,7 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                     warns = sum(1 for c in checks if c.get("status") == "WARNING")
                     deduction = retry_result.get("group_score_deduction", 0)
                     await _live_update("verification",
-                               f"Pass {gid}/5 done: {passed} pass, {failed} fail, "
+                               f"Pass {gid}/{total_passes} done: {passed} pass, {failed} fail, "
                                f"{warns} warn (deduction: -{deduction})", {
                                    "type": "verify_group_done",
                                    "group_id": gid,
@@ -949,7 +1132,7 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                     }]
                     group_results[gid] = {"group": f"group{gid}", "checks": err_checks}
                     await _live_update("verification",
-                               f"Pass {gid}/5: Failed — {str(e)[:100]}", {
+                               f"Pass {gid}/{total_passes}: Failed — {str(e)[:100]}", {
                                    "type": "verify_group_done",
                                    "group_id": gid,
                                    "group_name": gname,
@@ -972,6 +1155,8 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
             gid = group["id"]
             if gid in group_results:
                 checks = group_results[gid].get("checks", [])
+                # Annotate each check with extraction data confidence
+                _annotate_check_confidence(checks, session.extracted_data, group["needs"])
                 all_checks.extend(checks)
                 group_score_deductions += group_results[gid].get("group_score_deduction", 0)
 
@@ -988,6 +1173,13 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                 session.extracted_data, identity_resolver=identity_resolver
             )
             if det_checks:
+                # Deterministic checks operate across all doc types
+                all_det_types = list({
+                    fdata.get("document_type", "")
+                    for fdata in session.extracted_data.values()
+                    if fdata.get("document_type")
+                })
+                _annotate_check_confidence(det_checks, session.extracted_data, all_det_types)
                 all_checks.extend(det_checks)
                 det_fails = sum(1 for c in det_checks if c.get("status") == "FAIL")
                 det_warns = sum(1 for c in det_checks if c.get("status") == "WARNING")
@@ -1009,11 +1201,11 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
 
         # ── GROUP 5: META / SYNTHESIS ──
         yield _update(session, "verification",
-                     "Pass 5/5: Meta Assessment & Final Scoring...")
+                     f"Pass {total_passes}/{total_passes}: Meta Assessment & Final Scoring...")
 
         meta_system_prompt = (PROMPTS_DIR / "verify_group5_meta.txt").read_text(encoding="utf-8")
 
-        # Build meta input: results from groups 1-4 + deterministic checks + memory bank
+        # Build meta input: results from groups 1-5 + deterministic checks + memory bank
         doc_list = [
             f"  - {d['filename']} ({d.get('document_type', 'OTHER')})"
             for d in session.documents
@@ -1047,9 +1239,9 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                     f"Documents provided:\n" + "\n".join(doc_list) + f"\n\n{meta_input}"
                 ),
                 system_prompt=meta_system_prompt,
-                expect_json=VERIFY_GROUP_SCHEMAS.get(5, True),
+                expect_json=VERIFY_GROUP_SCHEMAS.get(6, True),
                 temperature=0.1,
-                task_label="Verification Pass 5: Meta Assessment & Scoring",
+                task_label=f"Verification Pass {total_passes}: Meta Assessment & Scoring",
                 on_progress=_llm_progress,
                 think=True,
                 tools=OLLAMA_TOOLS if rag_store else None,
@@ -1078,7 +1270,7 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                 if rc in _META_RULE_CODES or rc not in existing_codes:
                     meta_checks.append(mc)
                 else:
-                    logger.info(f"Meta check '{rc}' dropped — already exists from Groups 1-4")
+                    logger.info(f"Meta check '{rc}' dropped — already exists from Groups 1-5")
             all_checks.extend(meta_checks)
 
             # ── Deduplicate overlapping LLM/deterministic checks ──
@@ -1192,10 +1384,10 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                 narrative_embeddings = await get_embeddings(narrative_queries)
                 narrative_chunks = []
                 seen_ids = set()
-                for nq_emb in narrative_embeddings:
+                for nq_text, nq_emb in zip(narrative_queries, narrative_embeddings):
                     if not nq_emb or all(v == 0.0 for v in nq_emb[:5]):
                         continue
-                    chunks = rag_store.query_sync(nq_emb, n_results=3)
+                    chunks = rag_store.query_sync(nq_emb, n_results=3, query_text=nq_text)
                     for chunk in chunks:
                         cid = f"{chunk.filename}_p{chunk.page_number}_c{chunk.chunk_index}"
                         if cid not in seen_ids:
@@ -1215,9 +1407,13 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
 
         # ── Define parallel tasks ──
         async def _reflection_task():
-            """Run self-reflection if there are issues to review."""
-            if not has_issues:
-                return None
+            """Run self-reflection — always runs for quality assurance.
+
+            When there are non-PASS issues, audits for contradictions and
+            status-evidence mismatches.  When all LLM checks pass, runs a
+            lighter evidence-quality-only audit to catch weak evidence or
+            fabricated citations in PASS results.
+            """
             try:
                 return await run_self_reflection(
                     all_checks, on_progress=_llm_progress,
@@ -1249,7 +1445,7 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                          "Running self-reflection + narrative report in parallel...")
         else:
             yield _update(session, "verification",
-                         "Self-reflection: skipped (all LLM checks passed). Generating narrative...")
+                         "Running evidence-quality audit + narrative report in parallel...")
 
         yield _update(session, "llm_info",
                      f"Narrative input: {len(narrative_payload):,} chars", {
@@ -1607,8 +1803,14 @@ def _flatten_extraction_for_rag(data: dict, doc_type: str, filename: str) -> lis
             if not isinstance(txn, dict):
                 continue
             txn_parts = []
-            for k in ("row_number", "document_number", "nature", "date",
-                       "executant", "claimant", "extent", "consideration"):
+            # Include transaction_id first for traceability
+            tid = txn.get("transaction_id")
+            if tid:
+                txn_parts.append(f"Transaction ID: {tid}")
+            for k in ("row_number", "document_number", "transaction_type", "date",
+                       "seller_or_executant", "buyer_or_claimant", "extent",
+                       "consideration_amount", "survey_number", "registration_date",
+                       "remarks"):
                 v = txn.get(k)
                 if v:
                     txn_parts.append(f"{k.replace('_', ' ').title()}: {v}")
@@ -1817,7 +2019,7 @@ def _build_group_results_summary(
     """
     summary = {}
 
-    # Groups 1-4: LLM verification groups
+    # Groups 1-5: LLM verification groups
     for i, group in enumerate(VERIFY_GROUPS):
         gid = group["id"]
         group_checks = group_results.get(gid, {}).get("checks", [])
@@ -1837,10 +2039,10 @@ def _build_group_results_summary(
             "deduction": det_deduction,
         }
 
-    # Meta group (group 5)
+    # Meta group (group 6)
     if meta_checks:
         meta_deduction = sum(_compute_check_deduction(c) for c in meta_checks)
-        summary["5"] = {
+        summary["6"] = {
             "name": "Meta Assessment",
             "check_count": len(meta_checks),
             "deduction": meta_deduction,
@@ -1978,6 +2180,62 @@ def _precompute_deterministic_tools(memory_bank: MemoryBank) -> str:
     ])
     logger.info(f"Pre-computed {len(sections)} deterministic tool results ({len(block):,} chars)")
     return block
+
+
+# ── Per-check confidence annotation ─────────────────────────────────
+_CONFIDENCE_BAND_THRESHOLDS = [
+    (0.85, "HIGH"),
+    (0.65, "MODERATE"),
+    (0.45, "LOW"),
+    (0.0, "VERY_LOW"),
+]
+
+
+def _confidence_band(score: float) -> str:
+    """Map a 0.0-1.0 confidence score to a human-readable band."""
+    for threshold, label in _CONFIDENCE_BAND_THRESHOLDS:
+        if score >= threshold:
+            return label
+    return "VERY_LOW"
+
+
+def _annotate_check_confidence(
+    checks: list[dict],
+    extracted_data: dict,
+    needed_types: list[str],
+) -> None:
+    """Add ``data_confidence`` and ``data_confidence_score`` to each check.
+
+    Computes the minimum extraction confidence across all documents whose
+    type appears in *needed_types*.  This indicates how much trust to place
+    in the underlying extracted data that fed the verification check.
+
+    Modifies *checks* in-place.
+    """
+    min_score = 1.0
+    has_any = False
+    for _fname, fdata in extracted_data.items():
+        dtype = fdata.get("document_type", "")
+        if dtype not in needed_types:
+            continue
+        data = fdata.get("data")
+        if not isinstance(data, dict):
+            continue
+        score = data.get("_confidence_score")
+        if score is not None:
+            has_any = True
+            if score < min_score:
+                min_score = score
+
+    if not has_any:
+        return  # No confidence info — don't annotate
+
+    band = _confidence_band(min_score)
+    for check in checks:
+        if not isinstance(check, dict):
+            continue
+        check["data_confidence"] = band
+        check["data_confidence_score"] = round(min_score, 3)
 
 
 def _compute_score_deductions(all_checks: list[dict]) -> int:
@@ -2368,19 +2626,20 @@ _GROUP_EXPECTED_RULES: dict[int, list[tuple[str, str]]] = {
         ("POA_SALE", "Power of Attorney Sale Detection"),
         ("LAYOUT_APPROVAL", "Layout Approval Check"),
     ],
-    3: [  # Cross-Document Consistency
+    3: [  # Cross-Document Property Checks
         ("SURVEY_NUMBER_MISMATCH", "Survey Number Consistency"),
         ("OWNER_NAME_MISMATCH", "Owner Name Consistency"),
         ("PORAMBOKE_DETECTION", "Poramboke / Government Land Detection"),
     ],
-    4: [  # Chain & Pattern Analysis
+    4: [  # Cross-Document Compliance Checks
+        ("RESTRICTED_LAND", "Trust / Wakf / Temple Land Detection"),
+        ("LAND_CEILING_CHECK", "Land Ceiling & Surplus Detection"),
+        ("NA_CONVERSION", "NA Conversion Check"),
+    ],
+    5: [  # Chain & Pattern Analysis
         ("BROKEN_CHAIN_OF_TITLE", "Chain of Title Continuity"),
         ("RAPID_FLIPPING", "Rapid Property Flipping"),
         ("GOVERNMENT_ACQUISITION", "Government Acquisition Check"),
-    ],
-    5: [  # Meta Assessment
-        ("OVERALL_TITLE_OPINION", "Overall Title Opinion"),
-        ("MISSING_DOCUMENTS", "Missing Documents Check"),
     ],
 }
 

@@ -257,6 +257,31 @@ class TestSurveyNumbersMatch:
         assert matched is False
         assert mtype == "mismatch"
 
+    def test_sibling_subdivisions_mismatch(self):
+        """Same base + subdivision, different sub-subdivisions → mismatch (not OCR).
+        e.g. 543/1A1 vs 543/1C1 are distinct legal parcels, not OCR errors."""
+        matched, mtype = survey_numbers_match("543-1A1", "543-1C1")
+        assert matched is False
+        assert mtype == "mismatch"
+
+    def test_sibling_subdivisions_mismatch_2(self):
+        """544/1A1 vs 544/1B1 — different sibling subdivisions."""
+        matched, mtype = survey_numbers_match("544-1A1", "544-1B1")
+        assert matched is False
+        assert mtype == "mismatch"
+
+    def test_same_base_different_subdivisions_mismatch(self):
+        """Same base, different subdivisions (543/1 vs 543/2) → mismatch."""
+        matched, mtype = survey_numbers_match("543/1", "543/2")
+        assert matched is False
+        assert mtype == "mismatch"
+
+    def test_parent_to_sub_subdivision_still_matches(self):
+        """543/1 vs 543/1A1 → subdivision (parent-child still OK)."""
+        matched, mtype = survey_numbers_match("543/1", "543/1A1")
+        assert matched is True
+        assert mtype == "subdivision"
+
 
 # ═══════════════════════════════════════════════════
 # 5. split_survey_numbers
@@ -904,11 +929,13 @@ class TestECTransactionDedup:
         from app.pipeline.extractors.ec import _dedup_ec_transactions
         sparse = {"document_number": "1001", "date": "01-01-2020",
                    "seller_or_executant": "A", "buyer_or_claimant": "B",
+                   "survey_number": "311/1", "transaction_type": "SALE",
                    "consideration_amount": "", "remarks": ""}
         rich = {"document_number": "1001", "date": "01-01-2020",
                 "seller_or_executant": "A", "buyer_or_claimant": "B",
+                "survey_number": "311/1", "transaction_type": "SALE",
                 "consideration_amount": "5,00,000", "remarks": "Sale registered",
-                "extent": "2400 sq.ft", "survey_number": "311/1"}
+                "extent": "2400 sq.ft"}
         result = _dedup_ec_transactions([sparse, rich])
         assert len(result) == 1
         assert result[0]["consideration_amount"] == "5,00,000"

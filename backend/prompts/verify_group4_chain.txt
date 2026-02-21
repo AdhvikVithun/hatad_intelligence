@@ -57,12 +57,20 @@ If you find no relevant data, say so explicitly — do NOT invent or assume fact
 Below are GOLD-STANDARD examples of correct check results. Study the reasoning, evidence format, and status assignment carefully.
 
 EXAMPLE 1 — BROKEN_CHAIN_OF_TITLE (FAIL):
+
+REASONING SCAFFOLD (think through these steps before writing the check):
+Step 1: List ALL transactions chronologically: date → seller → buyer → doc_no
+Step 2: For each consecutive pair (txn_N, txn_N+1), verify buyer_N == seller_N+1
+        (allow Tamil name variations: initials, S/o, Thiru, etc.)
+Step 3: Verify the Sale Deed seller appears as the LAST buyer in the EC chain.
+Step 4: If any link fails → FAIL. If all links hold → PASS.
+
 {
   "rule_code": "BROKEN_CHAIN_OF_TITLE",
   "rule_name": "Chain of Title Continuity",
   "severity": "CRITICAL",
   "status": "FAIL",
-  "explanation": "The EC shows: (1) A sold to B in 2010, (2) C sold to D in 2018. There is NO transaction showing B selling or transferring to C. The chain is broken between transactions 1 and 2 — the buyer in the first transaction (B) does not appear as the seller in the second (C). This gap means C's title is not traceable to the original chain.",
+  "explanation": "Chain walk: (1) Doc 2001/2010: A → B, (2) Doc 4050/2018: C → D. Step 2 check: buyer of txn 1 = 'Bala' ≠ seller of txn 2 = 'Kumar'. No intermediate transfer (inheritance, partition, gift) found for Bala→Kumar. The chain is broken between transactions 1 and 2.",
   "recommendation": "Investigate how C acquired ownership from B. There may be an unregistered sale, inheritance, or partition that is not reflected in the EC. Obtain all intermediate documents. Do NOT proceed until the chain is complete.",
   "evidence": "[EC_Tambaram.pdf] page 3: 'Doc No. 2001/2010, dated 15.06.2010 — Sale Deed, Raju (seller) to Bala (buyer)'. Page 5: 'Doc No. 4050/2018, dated 22.04.2018 — Sale Deed, Kumar (seller) to Devi (buyer)'. Gap: Bala (buyer in 2010) never appears as seller. Kumar (seller in 2018) has no acquisition entry. Chain is broken."
 }
@@ -94,6 +102,32 @@ EXAMPLE 3 — GOVERNMENT_ACQUISITION (PASS):
 - Each HIGH FAIL: -8 points
 - Each MEDIUM FAIL: -3 points
 - Each WARNING: -1 point
+
+═══ COMMON MISTAKES TO AVOID (ANTI-EXAMPLES) ═══
+
+WRONG — Flagging normal chain transfers as "rapid flipping":
+  "Property sold in 2015 and again in 2022 — possible rapid flipping."
+  WHY THIS IS WRONG: 7 years between sales is NORMAL. Rapid flipping means 2+ sales within 6 months or less. A gap of years between transfers is completely ordinary.
+
+WRONG — Marking chain as broken when the EC claimant and sale deed seller have different name formats:
+  "EC claimant: 'R. Murugan' but sale deed seller: 'Murugan S/o Raman'. Broken chain."
+  WHY THIS IS WRONG: 'R. Murugan' and 'Murugan S/o Raman' are the SAME PERSON — 'R.' is the initial for 'Raman' (the father). Tamil naming convention uses initials derived from the father's name. This is a common format difference, not a chain break.
+
+WRONG — Flagging a seller below age 10 in a historic transaction:
+  "Seller aged 5 years in a 1965 partition deed — AGE_FRAUD FAIL."
+  WHY THIS IS WRONG: Partition deeds and settlement deeds can name children as recipients/beneficiaries. A 5-year-old listed as a party in a partition is as a RECIPIENT, not as a seller executing a sale. Only flag minors who are executants (sellers) in sale deeds.
+
+═══ TOOL FAILURE HANDLING ═══
+
+If search_documents returns 0 results for a query:
+  - State: "No matching text found in uploaded documents for [query]."
+  - Do NOT fabricate quotes or invent page numbers.
+  - Base your status on other available evidence (Memory Bank facts, extracted data).
+  - If no evidence exists at all, set status to NOT_APPLICABLE with explanation.
+
+If query_knowledge_base returns an error:
+  - Fall back to the extracted document data provided in the prompt.
+  - Note in evidence: "Knowledge base unavailable; analysis based on extracted data only."
 
 Return ONLY valid JSON:
 {

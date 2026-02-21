@@ -12,6 +12,12 @@ from app.pipeline.sarvam_ocr import (
     _parse_sarvam_html,
     _assess_page_quality,
     _extract_html_from_zip,
+    _extract_metadata_page_texts,
+    _validate_pdf,
+    _cb_record_failure,
+    _cb_record_success,
+    _cb_is_open,
+    reset_circuit_breaker,
     merge_sarvam_with_pdfplumber,
     sarvam_extract_text,
     _sarvam_extract_sync,
@@ -96,10 +102,133 @@ class TestParseSarvamHtml:
         assert len(pages) == 1
         assert "முருகன்" in pages[0]
 
+    def test_page_body_container(self):
+        """Sarvam's actual HTML format uses page-body-container divs."""
+        html = """
+        <!DOCTYPE html>
+        <html lang="ta-IN">
+        <head><title>Document</title></head>
+        <body>
+          <div class="page-body-container"><p>Page 1 content</p></div>
+          <div class="page-body-container"><p>Page 2 content</p></div>
+          <div class="page-body-container"><p>Page 3 content</p></div>
+        </body></html>
+        """
+        pages = _parse_sarvam_html(html)
+        assert len(pages) == 3
+        assert "Page 1 content" in pages[0]
+        assert "Page 2 content" in pages[1]
+        assert "Page 3 content" in pages[2]
+
+    def test_page_body_container_with_nested_content(self):
+        """page-body-container divs may contain tables, figures, etc."""
+        html = """
+        <html><body>
+          <div class="page-body-container">
+            <h1>Sale Deed</h1>
+            <table><tr><td>Row 1</td></tr></table>
+          </div>
+          <div class="page-body-container">
+            <p>விற்பனை பத்திரம்</p>
+          </div>
+        </body></html>
+        """
+        pages = _parse_sarvam_html(html)
+        assert len(pages) == 2
+        assert "Sale Deed" in pages[0]
+        assert "Row 1" in pages[0]
+        assert "விற்பனை" in pages[1]
+
+    def test_page_body_container_20_pages(self):
+        """Multi-page document (like a 20-page sale deed) should split correctly."""
+        divs = "\n".join(
+            f'<div class="page-body-container"><p>Page {i} text here</p></div>'
+            for i in range(1, 21)
+        )
+        html = f"<html><body>{divs}</body></html>"
+        pages = _parse_sarvam_html(html)
+        assert len(pages) == 20
+        assert "Page 1 text here" in pages[0]
+        assert "Page 20 text here" in pages[19]
+
+    def test_page_body_container_preferred_over_fallback(self):
+        """page-body-container should be picked even if other divs exist."""
+        html = """
+        <html><body>
+          <div class="header">Header</div>
+          <div class="page-body-container"><p>Real page 1</p></div>
+          <div class="page-body-container"><p>Real page 2</p></div>
+          <div class="footer">Footer</div>
+        </body></html>
+        """
+        pages = _parse_sarvam_html(html)
+        assert len(pages) == 2
+        assert "Header" not in pages[0] or "Real page 1" in pages[0]
+
 
 # ═══════════════════════════════════════════════════
-# QUALITY ASSESSMENT
+# METADATA PAGE TEXT EXTRACTION
 # ═══════════════════════════════════════════════════
+
+class TestExtractMetadataPageTexts:
+    """Tests for extracting per-page text from Sarvam metadata JSON files."""
+
+    def _make_zip_with_metadata(self, tmp_path, page_data):
+        """Create a ZIP with metadata/page_NNN.json files."""
+        import json
+        zip_path = tmp_path / "output.zip"
+        import zipfile
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("document.html", "<html><body>dummy</body></html>")
+            for i, blocks in enumerate(page_data, 1):
+                meta = {"page_num": i, "blocks": blocks}
+                zf.writestr(f"metadata/page_{i:03d}.json", json.dumps(meta))
+        return zip_path
+
+    def test_basic_extraction(self, tmp_path):
+        page_data = [
+            [{"text": "Page 1 line 1"}, {"text": "Page 1 line 2"}],
+            [{"text": "Page 2 content"}],
+        ]
+        zip_path = self._make_zip_with_metadata(tmp_path, page_data)
+        texts = _extract_metadata_page_texts(zip_path)
+        assert len(texts) == 2
+        assert "Page 1 line 1" in texts[0]
+        assert "Page 1 line 2" in texts[0]
+        assert "Page 2 content" in texts[1]
+
+    def test_content_field_fallback(self, tmp_path):
+        """Blocks with 'content' instead of 'text' should work."""
+        page_data = [
+            [{"content": "Block via content field"}],
+        ]
+        zip_path = self._make_zip_with_metadata(tmp_path, page_data)
+        texts = _extract_metadata_page_texts(zip_path)
+        assert len(texts) == 1
+        assert "Block via content field" in texts[0]
+
+    def test_no_metadata_returns_empty(self, tmp_path):
+        """ZIP without metadata files should return empty list."""
+        import zipfile
+        zip_path = tmp_path / "output.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("document.html", "<html></html>")
+        texts = _extract_metadata_page_texts(zip_path)
+        assert texts == []
+
+    def test_missing_file_returns_empty(self, tmp_path):
+        texts = _extract_metadata_page_texts(tmp_path / "nonexistent.zip")
+        assert texts == []
+
+    def test_20_pages(self, tmp_path):
+        page_data = [
+            [{"text": f"Content for page {i}"}] for i in range(1, 21)
+        ]
+        zip_path = self._make_zip_with_metadata(tmp_path, page_data)
+        texts = _extract_metadata_page_texts(zip_path)
+        assert len(texts) == 20
+        assert "page 1" in texts[0]
+        assert "page 20" in texts[19]
 
 class TestAssessPageQuality:
     def test_high_quality(self):
@@ -460,3 +589,442 @@ class TestFeatureFlag:
             with patch("app.pipeline.sarvam_ocr.SARVAM_ENABLED", True):
                 # Just verify the flag; actual extraction is tested elsewhere
                 assert True
+
+
+# ═══════════════════════════════════════════════════
+# CIRCUIT BREAKER
+# ═══════════════════════════════════════════════════
+
+class TestCircuitBreaker:
+    """Tests for the thread-safe circuit breaker protecting Sarvam calls."""
+
+    def setup_method(self):
+        reset_circuit_breaker()
+
+    def teardown_method(self):
+        reset_circuit_breaker()
+
+    def test_starts_closed(self):
+        """Circuit breaker should start in closed (healthy) state."""
+        assert _cb_is_open() is False
+
+    def test_single_failure_stays_closed(self):
+        """One failure should NOT open the breaker."""
+        _cb_record_failure()
+        assert _cb_is_open() is False
+
+    def test_two_failures_stays_closed(self):
+        """Two failures (below threshold of 3) should NOT open the breaker."""
+        _cb_record_failure()
+        _cb_record_failure()
+        assert _cb_is_open() is False
+
+    def test_three_failures_opens(self):
+        """Three consecutive failures should open the breaker."""
+        _cb_record_failure()
+        _cb_record_failure()
+        _cb_record_failure()
+        assert _cb_is_open() is True
+
+    def test_success_resets_counter(self):
+        """A success after failures should reset the counter."""
+        _cb_record_failure()
+        _cb_record_failure()
+        _cb_record_success()
+        # Now two more failures should NOT open (counter was reset to 0)
+        _cb_record_failure()
+        _cb_record_failure()
+        assert _cb_is_open() is False
+
+    def test_success_after_partial_failures(self):
+        """Record 2 failures, then success, then 2 more: breaker stays closed."""
+        _cb_record_failure()
+        _cb_record_failure()
+        _cb_record_success()
+        _cb_record_failure()
+        _cb_record_failure()
+        assert _cb_is_open() is False
+
+    def test_reset_clears_open_breaker(self):
+        """reset_circuit_breaker should close an open breaker."""
+        _cb_record_failure()
+        _cb_record_failure()
+        _cb_record_failure()
+        assert _cb_is_open() is True
+        reset_circuit_breaker()
+        assert _cb_is_open() is False
+
+    def test_cooldown_expires(self):
+        """After cooldown, the breaker should allow a probe attempt."""
+        import app.pipeline.sarvam_ocr as sarvam_mod
+
+        _cb_record_failure()
+        _cb_record_failure()
+        _cb_record_failure()
+        assert _cb_is_open() is True
+
+        # Simulate cooldown expiry by moving _cb_disabled_until to the past
+        with sarvam_mod._cb_lock:
+            sarvam_mod._cb_disabled_until = 0.0
+
+        assert _cb_is_open() is False
+
+    def test_open_breaker_skips_extraction(self):
+        """sarvam_extract_text should return None when breaker is open."""
+        _cb_record_failure()
+        _cb_record_failure()
+        _cb_record_failure()
+
+        with patch("app.pipeline.sarvam_ocr.SARVAM_ENABLED", True), \
+             patch("app.pipeline.sarvam_ocr._check_sarvam_sdk", return_value=True):
+            loop = asyncio.new_event_loop()
+            try:
+                result = loop.run_until_complete(sarvam_extract_text(Path("test.pdf")))
+            finally:
+                loop.close()
+            assert result is None
+
+
+# ═══════════════════════════════════════════════════
+# FILE VALIDATION
+# ═══════════════════════════════════════════════════
+
+class TestFileValidation:
+    """Tests for _validate_pdf file pre-flight checks."""
+
+    def test_valid_pdf(self, tmp_path):
+        """A valid PDF file should pass validation."""
+        pdf = tmp_path / "good.pdf"
+        pdf.write_bytes(b"%PDF-1.7 some content here")
+        assert _validate_pdf(pdf) is None
+
+    def test_missing_file(self, tmp_path):
+        """A missing file should return an error."""
+        err = _validate_pdf(tmp_path / "nonexistent.pdf")
+        assert err is not None
+        assert "does not exist" in err
+
+    def test_empty_file(self, tmp_path):
+        """A 0-byte file should return an error."""
+        pdf = tmp_path / "empty.pdf"
+        pdf.write_bytes(b"")
+        err = _validate_pdf(pdf)
+        assert err is not None
+        assert "empty" in err.lower()
+
+    def test_file_too_large(self, tmp_path):
+        """A file exceeding SARVAM_MAX_FILE_MB should be rejected."""
+        pdf = tmp_path / "huge.pdf"
+        pdf.write_bytes(b"%PDF-1.4" + b"\x00" * 100)  # small file
+
+        # Patch _MAX_FILE_BYTES to a tiny value
+        with patch("app.pipeline.sarvam_ocr._MAX_FILE_BYTES", 50):
+            err = _validate_pdf(pdf)
+            assert err is not None
+            assert "too large" in err.lower()
+
+    def test_not_pdf_magic_bytes(self, tmp_path):
+        """A file without %PDF magic should be rejected."""
+        pdf = tmp_path / "fake.pdf"
+        pdf.write_bytes(b"PK\x03\x04 this is a ZIP not a PDF")
+        err = _validate_pdf(pdf)
+        assert err is not None
+        assert "not a valid PDF" in err
+
+    def test_validation_error_skips_extraction(self, tmp_path):
+        """sarvam_extract_text should return None for invalid files."""
+        bad = tmp_path / "bad.txt"
+        bad.write_bytes(b"not a pdf")
+
+        with patch("app.pipeline.sarvam_ocr.SARVAM_ENABLED", True), \
+             patch("app.pipeline.sarvam_ocr._check_sarvam_sdk", return_value=True):
+            reset_circuit_breaker()
+            loop = asyncio.new_event_loop()
+            try:
+                result = loop.run_until_complete(sarvam_extract_text(bad))
+            finally:
+                loop.close()
+            assert result is None
+
+
+# ═══════════════════════════════════════════════════
+# EXPONENTIAL BACKOFF
+# ═══════════════════════════════════════════════════
+
+class TestExponentialBackoff:
+    """Verify that _sarvam_extract_sync uses exponential backoff between retries."""
+
+    def setup_method(self):
+        reset_circuit_breaker()
+
+    def teardown_method(self):
+        reset_circuit_breaker()
+
+    def test_backoff_durations(self, tmp_path):
+        """With 3 retries (4 total attempts), sleeps should be 1s, 2s, 4s."""
+        test_pdf = tmp_path / "test.pdf"
+        test_pdf.write_bytes(b"%PDF-1.4 content")
+
+        import sys
+        mock_sarvamai = MagicMock()
+        mock_sarvamai.SarvamAI.side_effect = RuntimeError("down")
+        sys.modules["sarvamai"] = mock_sarvamai
+
+        sleep_calls = []
+
+        try:
+            with patch("app.pipeline.sarvam_ocr.SARVAM_MAX_RETRIES", 3), \
+                 patch("app.pipeline.sarvam_ocr.time.sleep", side_effect=lambda s: sleep_calls.append(s)):
+                result = _sarvam_extract_sync(test_pdf)
+        finally:
+            del sys.modules["sarvamai"]
+
+        assert result is None
+        # 4 attempts → 3 sleeps: 1, 2, 4
+        assert sleep_calls == [1, 2, 4]
+
+    def test_single_retry_sleeps_once(self, tmp_path):
+        """With SARVAM_MAX_RETRIES=1 (2 attempts), sleep should be 1s."""
+        test_pdf = tmp_path / "test.pdf"
+        test_pdf.write_bytes(b"%PDF-1.4 content")
+
+        import sys
+        mock_sarvamai = MagicMock()
+        mock_sarvamai.SarvamAI.side_effect = RuntimeError("down")
+        sys.modules["sarvamai"] = mock_sarvamai
+
+        sleep_calls = []
+
+        try:
+            with patch("app.pipeline.sarvam_ocr.SARVAM_MAX_RETRIES", 1), \
+                 patch("app.pipeline.sarvam_ocr.time.sleep", side_effect=lambda s: sleep_calls.append(s)):
+                result = _sarvam_extract_sync(test_pdf)
+        finally:
+            del sys.modules["sarvamai"]
+
+        assert result is None
+        assert sleep_calls == [1]
+
+    def test_no_sleep_on_first_success(self, tmp_path):
+        """If the first attempt succeeds, no sleep should occur."""
+        test_pdf = tmp_path / "test.pdf"
+        test_pdf.write_bytes(b"%PDF-1.4 content")
+
+        import sys
+        import app.pipeline.sarvam_ocr as sarvam_mod
+
+        mock_result = {"total_pages": 1, "pages": [], "full_text": "ok"}
+
+        sleep_calls = []
+
+        with patch.object(sarvam_mod, "_sarvam_extract_single_attempt", return_value=mock_result), \
+             patch("app.pipeline.sarvam_ocr.SARVAM_MAX_RETRIES", 3), \
+             patch("app.pipeline.sarvam_ocr.time.sleep", side_effect=lambda s: sleep_calls.append(s)):
+            result = _sarvam_extract_sync(test_pdf)
+
+        assert result is not None
+        assert sleep_calls == []
+
+
+# ═══════════════════════════════════════════════════
+# PER-STEP ISOLATION
+# ═══════════════════════════════════════════════════
+
+class TestPerStepIsolation:
+    """Each step in _sarvam_extract_single_attempt should fail gracefully."""
+
+    def setup_method(self):
+        reset_circuit_breaker()
+
+    def teardown_method(self):
+        reset_circuit_breaker()
+
+    def _make_mock_client(self):
+        """Return a mock SarvamAI client with reasonable defaults."""
+        mock_job = MagicMock()
+        mock_job.job_id = "test-job"
+        mock_status = MagicMock()
+        mock_status.job_state = "Completed"
+        mock_job.wait_until_complete.return_value = mock_status
+
+        mock_client = MagicMock()
+        mock_client.document_intelligence.create_job.return_value = mock_job
+        return mock_client, mock_job
+
+    def test_create_job_failure(self, tmp_path):
+        """create_job raising should return None, not crash."""
+        test_pdf = tmp_path / "test.pdf"
+        test_pdf.write_bytes(b"%PDF-1.4 test")
+
+        import sys
+        mock_sarvamai = MagicMock()
+        mock_client = MagicMock()
+        mock_client.document_intelligence.create_job.side_effect = RuntimeError("quota exceeded")
+        mock_sarvamai.SarvamAI.return_value = mock_client
+        sys.modules["sarvamai"] = mock_sarvamai
+
+        try:
+            from app.pipeline.sarvam_ocr import _sarvam_extract_single_attempt
+            with patch("app.pipeline.sarvam_ocr.SARVAM_API_KEY", "test-key"):
+                result = _sarvam_extract_single_attempt(test_pdf)
+        finally:
+            del sys.modules["sarvamai"]
+
+        assert result is None
+
+    def test_upload_file_failure(self, tmp_path):
+        """upload_file raising should return None and attempt cancellation."""
+        test_pdf = tmp_path / "test.pdf"
+        test_pdf.write_bytes(b"%PDF-1.4 test")
+
+        import sys
+        mock_sarvamai = MagicMock()
+        mock_client, mock_job = self._make_mock_client()
+        mock_job.upload_file.side_effect = RuntimeError("network error")
+        mock_sarvamai.SarvamAI.return_value = mock_client
+        sys.modules["sarvamai"] = mock_sarvamai
+
+        try:
+            from app.pipeline.sarvam_ocr import _sarvam_extract_single_attempt
+            with patch("app.pipeline.sarvam_ocr.SARVAM_API_KEY", "test-key"):
+                result = _sarvam_extract_single_attempt(test_pdf)
+        finally:
+            del sys.modules["sarvamai"]
+
+        assert result is None
+        mock_job.cancel.assert_called_once()
+
+    def test_start_failure(self, tmp_path):
+        """job.start() raising should return None and cancel."""
+        test_pdf = tmp_path / "test.pdf"
+        test_pdf.write_bytes(b"%PDF-1.4 test")
+
+        import sys
+        mock_sarvamai = MagicMock()
+        mock_client, mock_job = self._make_mock_client()
+        mock_job.start.side_effect = RuntimeError("server error")
+        mock_sarvamai.SarvamAI.return_value = mock_client
+        sys.modules["sarvamai"] = mock_sarvamai
+
+        try:
+            from app.pipeline.sarvam_ocr import _sarvam_extract_single_attempt
+            with patch("app.pipeline.sarvam_ocr.SARVAM_API_KEY", "test-key"):
+                result = _sarvam_extract_single_attempt(test_pdf)
+        finally:
+            del sys.modules["sarvamai"]
+
+        assert result is None
+        mock_job.cancel.assert_called_once()
+
+    def test_download_failure(self, tmp_path):
+        """download_output raising should return None."""
+        test_pdf = tmp_path / "test.pdf"
+        test_pdf.write_bytes(b"%PDF-1.4 test")
+
+        import sys
+        mock_sarvamai = MagicMock()
+        mock_client, mock_job = self._make_mock_client()
+        mock_job.download_output.side_effect = RuntimeError("download failed")
+        mock_sarvamai.SarvamAI.return_value = mock_client
+        sys.modules["sarvamai"] = mock_sarvamai
+
+        try:
+            from app.pipeline.sarvam_ocr import _sarvam_extract_single_attempt
+            with patch("app.pipeline.sarvam_ocr.SARVAM_API_KEY", "test-key"):
+                result = _sarvam_extract_single_attempt(test_pdf)
+        finally:
+            del sys.modules["sarvamai"]
+
+        assert result is None
+
+
+# ═══════════════════════════════════════════════════
+# JOB CANCELLATION
+# ═══════════════════════════════════════════════════
+
+class TestJobCancellation:
+    """_try_cancel_job must never raise, regardless of what goes wrong."""
+
+    def test_cancel_success(self):
+        from app.pipeline.sarvam_ocr import _try_cancel_job
+        mock_job = MagicMock()
+        _try_cancel_job(mock_job)  # should not raise
+        mock_job.cancel.assert_called_once()
+
+    def test_cancel_raises_swallowed(self):
+        from app.pipeline.sarvam_ocr import _try_cancel_job
+        mock_job = MagicMock()
+        mock_job.cancel.side_effect = RuntimeError("cannot cancel")
+        _try_cancel_job(mock_job)  # must not raise
+
+    def test_cancel_no_cancel_attr(self):
+        from app.pipeline.sarvam_ocr import _try_cancel_job
+        mock_job = MagicMock(spec=[])  # no attributes at all
+        _try_cancel_job(mock_job)  # must not raise
+
+    def test_cancel_none_job(self):
+        from app.pipeline.sarvam_ocr import _try_cancel_job
+        _try_cancel_job(None)  # must not raise
+
+
+# ═══════════════════════════════════════════════════
+# BUILD RESULT
+# ═══════════════════════════════════════════════════
+
+class TestBuildResult:
+    """Tests for the _build_result helper."""
+
+    def test_single_page(self, tmp_path):
+        from app.pipeline.sarvam_ocr import _build_result
+        pdf = tmp_path / "test.pdf"
+        pdf.write_bytes(b"%PDF-1.4 content")
+
+        result = _build_result(pdf, ["Tamil text content here for testing"])
+        assert result["total_pages"] == 1
+        assert result["sarvam_pages"] == 1
+        assert result["pages"][0]["extraction_method"] == "sarvam"
+        assert result["pages"][0]["page_number"] == 1
+        assert result["metadata"]["extraction_source"] == "sarvam_ai"
+        assert result["metadata"]["file_size"] > 0
+
+    def test_multi_page(self, tmp_path):
+        from app.pipeline.sarvam_ocr import _build_result
+        pdf = tmp_path / "test.pdf"
+        pdf.write_bytes(b"%PDF-1.4 content")
+
+        texts = ["Page one text content", "Page two text content", "Page three text"]
+        result = _build_result(pdf, texts)
+        assert result["total_pages"] == 3
+        assert result["sarvam_pages"] == 3
+        assert [p["page_number"] for p in result["pages"]] == [1, 2, 3]
+
+    def test_missing_file_stat(self, tmp_path):
+        """_build_result should not crash if the file no longer exists."""
+        from app.pipeline.sarvam_ocr import _build_result
+        pdf = tmp_path / "deleted.pdf"
+        # Don't create the file — stat will fail
+        result = _build_result(pdf, ["some text"])
+        assert result["metadata"]["file_size"] == 0
+
+    def test_quality_assessment(self, tmp_path):
+        from app.pipeline.sarvam_ocr import _build_result
+        pdf = tmp_path / "test.pdf"
+        pdf.write_bytes(b"%PDF-1.4 content")
+
+        # HIGH quality — enough words and chars
+        long_text = " ".join(["word"] * 20)
+        result = _build_result(pdf, [long_text])
+        assert result["extraction_quality"] == "HIGH"
+
+        # LOW quality — too few words
+        result = _build_result(pdf, ["hi"])
+        assert result["extraction_quality"] == "LOW"
+
+    def test_mixed_quality(self, tmp_path):
+        from app.pipeline.sarvam_ocr import _build_result
+        pdf = tmp_path / "test.pdf"
+        pdf.write_bytes(b"%PDF-1.4 content")
+
+        texts = [" ".join(["word"] * 20), "hi"]
+        result = _build_result(pdf, texts)
+        assert result["extraction_quality"] == "MIXED"

@@ -71,6 +71,28 @@ EXAMPLE 3 — LAYOUT_APPROVAL (WARNING):
 - Each MEDIUM FAIL: -3 points
 - Each WARNING: -1 point
 
+═══ COMMON MISTAKES TO AVOID (ANTI-EXAMPLES) ═══
+
+WRONG — Flagging normal seller age as a capacity issue:
+  "Seller aged 68 years — elderly person, possible capacity concern."
+  WHY THIS IS WRONG: Age alone is not a capacity issue. Only flag if there is evidence of guardianship orders, mental health declarations, or the seller is a minor (below 18). Being elderly is normal.
+
+WRONG — Flagging a subdivided plot as layout violation:
+  "S.F.No. 123/4A — the '/4A' suffix suggests subdivision without approval."
+  WHY THIS IS WRONG: Survey number subdivision is a Revenue Department process, not a layout approval issue. Layout approval only applies when land is converted into a multi-plot residential layout with roads and amenities.
+
+═══ TOOL FAILURE HANDLING ═══
+
+If search_documents returns 0 results for a query:
+  - State: "No matching text found in uploaded documents for [query]."
+  - Do NOT fabricate quotes or invent page numbers.
+  - Base your status on other available evidence (Memory Bank facts, extracted data).
+  - If no evidence exists at all, set status to NOT_APPLICABLE with explanation.
+
+If query_knowledge_base returns an error:
+  - Fall back to the extracted document data provided in the prompt.
+  - Note in evidence: "Knowledge base unavailable; analysis based on extracted data only."
+
 IMPORTANT: Return EXACTLY 4 checks (POA_SALE, LAYOUT_APPROVAL, BUILDING_VIOLATION, SELLER_CAPACITY). Do NOT return stamp duty, geographic, or environmental checks — those are handled by the deterministic engine.
 
 Return ONLY valid JSON:
