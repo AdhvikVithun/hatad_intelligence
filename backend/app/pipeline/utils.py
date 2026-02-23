@@ -25,6 +25,42 @@ _TAMIL_DIGIT_TABLE = str.maketrans(
     "0123456789",
 )
 
+# ── Tamil letter subdivisions used in survey numbers ──
+# Tamil Nadu survey subdivisions use letters A, B, C, D, E etc.
+# In Tamil documents these appear as Tamil vowel letters:
+#   ஏ (ee) = A,  பி (pi) = B,  சி (chi) = C,  டி (ti) = D,  ஈ (ii) = E
+# The mapping intentionally targets only the specific Tamil characters
+# used as subdivision labels on Tamil Nadu survey number plates / documents.
+_TAMIL_SUBDIVISION_MAP: dict[str, str] = {
+    "\u0B8F": "a",   # ஏ → A
+    "\u0BAA\u0BBF": "b",  # பி → B
+    "\u0B9A\u0BBF": "c",  # சி → C
+    "\u0B9F\u0BBF": "d",  # டி → D
+    "\u0B88": "e",   # ஈ → E
+    "\u0B8E\u0BAA\u0BCD": "f",  # எப் → F
+    "\u0B9C\u0BBF": "g",  # ஜி → G
+    "\u0B8E\u0B9A\u0BCD": "h",  # எச் → H
+}
+
+# Precompiled regex for fast replacement of Tamil subdivision letters
+import re as _re_sub  # local alias to avoid name clash
+_TAMIL_SUBDIV_RE = _re_sub.compile(
+    "|".join(_re_sub.escape(k) for k in sorted(_TAMIL_SUBDIVISION_MAP, key=len, reverse=True))
+)
+
+
+def _replace_tamil_subdivision_letters(s: str) -> str:
+    """Replace Tamil subdivision letters (ஏ, பி, சி, டி, etc.) with ASCII a-h.
+
+    Examples:
+      "318/1ஏ"   → "318/1a"
+      "543/1சி1" → "543/1c1"
+      "311/2பி"  → "311/2b"
+    """
+    if not s:
+        return s
+    return _TAMIL_SUBDIV_RE.sub(lambda m: _TAMIL_SUBDIVISION_MAP[m.group()], s)
+
 
 def normalize_tamil_numerals(s: str) -> str:
     """Replace Tamil digits (௦–௯) with ASCII equivalents.
@@ -270,6 +306,8 @@ def normalize_survey_number(sn: str) -> str:
     if not sn or not isinstance(sn, str):
         return ""
     s = normalize_tamil_numerals(sn.strip().lower())
+    # Replace Tamil subdivision letters (ஏ→a, பி→b, சி→c, டி→d, etc.)
+    s = _replace_tamil_subdivision_letters(s)
     # Remove known prefixes
     s = _SURVEY_PREFIXES.sub('', s)
     # Normalize separators: treat - and / equivalently

@@ -32,12 +32,20 @@ from app.pipeline.sale_deed_preparse import (
     detect_encumbrance_declaration,
     preparse_sale_deed,
     format_hints_for_prompt,
+    extract_party_names_from_section,
+    _is_garbage_name,
+    extract_stamp_duty_from_text,
+    count_stamp_sheets,
+    _find_schedule_zone,
 )
 from app.pipeline.extractors.sale_deed import (
     _union_parties,
     _union_ownership_history,
     _merge_sale_deed_results,
     _pick_richer,
+    _validate_seller_buyer,
+    _filter_current_sale_from_history,
+    _names_overlap,
 )
 
 
@@ -968,3 +976,343 @@ class TestMergeSaleDeedOwnershipHistory:
         assert result["property_description"] == "Land in SFNo 317"
         assert result["encumbrance_declaration"] == "Free from encumbrance"
         assert result["possession_date"] == "15.12.2012"
+
+
+# ═══════════════════════════════════════════════════════════
+# FIX 1: Party name garbage filtering
+# ═══════════════════════════════════════════════════════════
+
+class TestIsGarbageName:
+    """Tests for the _is_garbage_name filter."""
+
+    def test_location_keyword_maavattam(self):
+        assert _is_garbage_name("ப்பூர் மாவட்டம்") is True
+
+    def test_location_keyword_town(self):
+        assert _is_garbage_name("ப்பூர் டவுன்") is True
+
+    def test_location_keyword_kiraaamam(self):
+        assert _is_garbage_name("சோமையம்பாளையம் கிராமம்") is True
+
+    def test_short_honourific_fragment(self):
+        assert _is_garbage_name("மதி") is True
+
+    def test_valid_tamil_name(self):
+        assert _is_garbage_name("N. துளசிராம்") is False
+
+    def test_valid_english_name(self):
+        assert _is_garbage_name("A. Ponnarasi") is False
+
+    def test_address_fragment_extension(self):
+        assert _is_garbage_name("ராயபுரம் எக்ஸ்டென்சன்") is True
+
+    def test_valid_name_with_initial(self):
+        assert _is_garbage_name("R. ராணி") is False
+
+    def test_layout_in_name(self):
+        assert _is_garbage_name("K.R.E. லேஅவுட்") is True
+
+    def test_numbered_address(self):
+        assert _is_garbage_name("28 இலக்கமிட்ட") is True
+
+
+class TestExtractPartyNamesFiltering:
+    """Tests that extract_party_names_from_section filters garbage."""
+
+    def test_rejects_address_fragments(self):
+        """Seller section containing addresses should not produce location names."""
+        section = """திருப்பூர் மாவட்டம், திருப்பூர் டவுன், கதவு எண். 31 வசித்து வரும்
+திரு. N. துளசிராம் அவர்கள் மனைவி திருமதி. T. சத்தியபாமா,"""
+        names = extract_party_names_from_section(section)
+        # Should find real names only
+        for n in names:
+            assert "மாவட்டம்" not in n, f"Garbage name captured: {n}"
+            assert "டவுன்" not in n, f"Garbage name captured: {n}"
+
+    def test_extracts_real_names(self):
+        section = """திரு. N. துளசிராம் அவர்கள் மனைவி திருமதி. T. சத்தியபாமா,
+திரு. N. ராதாகிருஷ்ணன் அவர்கள் மனைவி திருமதி. R. ராணி,"""
+        names = extract_party_names_from_section(section)
+        real_names = [n for n in names if "துளசி" in n or "சத்திய" in n
+                      or "ராதா" in n or "ராணி" in n]
+        assert len(real_names) >= 2, f"Expected ≥2 real names, got {names}"
+
+    def test_rejects_short_fragments(self):
+        """Very short captures (≤3 alpha chars) should be rejected."""
+        section = "திருமதி. மா, next person"
+        names = extract_party_names_from_section(section)
+        for n in names:
+            assert len(n) > 3 or not _is_garbage_name(n), f"Short garbage: {n}"
+
+    def test_from_full_sample(self):
+        """Using SAMPLE_FULL_TEXT, should not produce garbage names."""
+        seller, buyer = detect_seller_buyer_sections(SAMPLE_FULL_TEXT)
+        if seller:
+            names = extract_party_names_from_section(seller)
+            for n in names:
+                assert "மாவட்டம்" not in n, f"Garbage seller name: {n}"
+                assert "டவுன்" not in n, f"Garbage seller name: {n}"
+
+
+# ═══════════════════════════════════════════════════════════
+# FIX 2: District extraction avoids address
+# ═══════════════════════════════════════════════════════════
+
+class TestDistrictAvoidsSellersAddress:
+    """Tests that district extraction picks property district, not seller's address."""
+
+    def test_property_district_over_address(self):
+        """When திருப்பூர் மாவட்டம் appears in seller address and
+        கோயமுத்தூர் மாவட்டம் appears in property zone, the result
+        should be கோயமுத்தூர்."""
+        text = """கதவு எண். 31 இலக்கமிட்ட விலாசத்தில் வசித்து வரும்
+திரு. N. துளசிராம் அவர்கள்,
+திருப்பூர் மாவட்டம், திருப்பூர் டவுன்,
+
+எழுதி வாங்குபவர் A. பொன்அரசி
+
+கோயமுத்தூர் வடக்கு தாலூக்கா, சோமையம்பாளையம் கிராமம்,
+கோயமுத்தூர் மாவட்டம், க.ச. 317 நெ."""
+        village, taluk, district = extract_property_location(text)
+        assert "கோயமுத்தூர்" in district, f"Expected கோயமுத்தூர், got '{district}'"
+
+    def test_multiline_address_filtered(self):
+        """Address marker on line N-1 should still cause line N to be filtered."""
+        text = """வசித்து வரும் கே.கே.புதூர்
+திருப்பூர் மாவட்டம்
+
+க.ச. 317 சோமையம்பாளையம் கிராமம்
+கோயமுத்தூர் மாவட்டம்"""
+        village, taluk, district = extract_property_location(text)
+        # கோயமுத்தூர் should be preferred — திருப்பூர் is near address marker
+        assert "கோயமுத்தூர்" in district, f"Expected கோயமுத்தூர், got '{district}'"
+
+    def test_increased_address_radius(self):
+        """DistrictName within 500 chars of address marker should be filtered.
+
+        With the old 200-char radius, a district 350 chars from 'வசித்து வரும்'
+        would pass through.  With the new 500-char radius, it gets rejected.
+        The correct property district appears much later, outside the radius.
+        """
+        text = (
+            "வசித்து வரும் திரு. Kumar அவர்கள்\n"
+            + ("x " * 160)  # ~320 chars of padding
+            + "திருப்பூர் மாவட்டம்\n"  # ~350 chars from address marker
+            + ("y " * 150)  # enough distance from address
+            + "\nக.ச. 317\nகோயமுத்தூர் மாவட்டம்\n"
+        )
+        village, taluk, district = extract_property_location(text)
+        assert "கோயமுத்தூர்" in district, f"Expected கோயமுத்தூர், got '{district}'"
+
+
+# ═══════════════════════════════════════════════════════════
+# FIX 3: Survey numbers filtered from recitals
+# ═══════════════════════════════════════════════════════════
+
+class TestSurveyNumberScheduleZone:
+    """Tests that survey extraction prefers schedule zone and filters recitals."""
+
+    def test_schedule_zone_only(self):
+        """When a schedule zone exists, only its surveys should be returned."""
+        text = """முன்பு பட்டா எண் 1366 க.ச. 316 இருந்தது
+
+அட்டவணை
+கோயமுத்தூர், சோமையம்பாளையம் கிராமம், க.ச. 317 நெ.
+சாட்சிகள்:"""
+        surveys = extract_survey_numbers(text, schedule_zone=_find_schedule_zone(text))
+        assert "317" in surveys, f"Expected 317 in {surveys}"
+        assert "316" not in surveys, f"316 should be filtered (recital): {surveys}"
+
+    def test_recital_survey_filtered_without_schedule(self):
+        """Even without schedule zone, surveys near recital markers should be filtered."""
+        # Put enough distance (>300 chars) between recital and property survey
+        padding = "\n" + ("text " * 80) + "\n"  # ~400 chars
+        text = f"பட்டா எண் 1366 இல் க.ச. 316{padding}க.ச. 317 நெ. சோமையம்பாளையம் கிராமம்"
+        surveys = extract_survey_numbers(text)
+        assert "317" in surveys
+        assert "316" not in surveys, f"316 should be filtered: {surveys}"
+
+    def test_multiple_recital_surveys_filtered(self):
+        """Multiple old surveys in recitals should be filtered."""
+        # Enough padding between recitals and the actual property survey
+        padding = "\n" + ("text " * 80) + "\n"  # ~400 chars
+        text = f"""முன்பு பட்டா எண் 1366 க.ச. 316
+கிரையப் பத்திரம் எழுதிக் கொடுத்து S.F.No. 318/1A{padding}க.ச. 317 நெ. property schedule"""
+        surveys = extract_survey_numbers(text)
+        assert "317" in surveys
+        assert "316" not in surveys, f"316 from recital: {surveys}"
+
+    def test_backward_compatible_no_zone(self):
+        """Without a schedule zone and no recitals, all surveys returned."""
+        text = "க.ச. 100 மற்றும் S.F.No. 200/1A"
+        surveys = extract_survey_numbers(text)
+        assert "100" in surveys
+        assert any("200" in s for s in surveys)
+
+
+# ═══════════════════════════════════════════════════════════
+# FIX 4: Stamp duty improvements
+# ═══════════════════════════════════════════════════════════
+
+class TestStampDutyFromText:
+    """Tests for explicit stamp duty extraction from deed body."""
+
+    def test_tamil_stamp_duty(self):
+        text = "முத்திரைத் தீர்வை ரூ. 5,68,100 செலுத்தப்பட்டது"
+        val = extract_stamp_duty_from_text(text)
+        assert val == 568100
+
+    def test_english_stamp_duty(self):
+        text = "stamp duty Rs. 568100 paid"
+        val = extract_stamp_duty_from_text(text)
+        assert val == 568100
+
+    def test_no_stamp_duty_in_text(self):
+        assert extract_stamp_duty_from_text("no stamp duty mentioned here") is None
+
+    def test_small_amount_filtered(self):
+        text = "stamp duty Rs. 50"
+        assert extract_stamp_duty_from_text(text) is None
+
+
+class TestCountStampSheetsImproved:
+    """Tests for the improved stamp serial detection."""
+
+    def test_serial_without_space(self):
+        """OCR dropping space: 'A123456' should still be detected."""
+        text = "A123456\nB234567\nRs. 25000\n"
+        count, total = count_stamp_sheets(text)
+        assert count == 2
+        assert total == 50000
+
+    def test_serial_with_space(self):
+        text = "A 123456\nB 234567\nRs. 25000\n"
+        count, total = count_stamp_sheets(text)
+        assert count == 2
+        assert total == 50000
+
+    def test_lowercase_serial(self):
+        text = "a 123456\nb 234567\nRs. 25000\n"
+        count, total = count_stamp_sheets(text)
+        assert count == 2
+
+    def test_expanded_search_window(self):
+        """Serials beyond 4000 chars should be found (window is now 8000)."""
+        padding = "x" * 5000
+        text = f"Rs. 25000\nA 123456\n{padding}\nB 234567\n"
+        count, total = count_stamp_sheets(text)
+        assert count == 2
+
+
+class TestStampDutyHintPriority:
+    """Tests that explicit stamp duty from text takes priority in hints."""
+
+    def test_text_stamp_duty_in_hints(self):
+        text = """Rs.\n25000\n
+A 123456
+
+முத்திரைத் தீர்வை ரூ. 5,68,100 செலுத்தப்பட்டது
+
+ரூபாய் 5,67,92,000/-க்கு கிரயம்"""
+        hints = preparse_sale_deed(text)
+        assert hints.get("stamp_duty_from_text") == 568100
+
+    def test_format_prefers_text_stamp_duty(self):
+        hints = {
+            "stamp_duty_from_text": 568100,
+            "stamp_sheet_count": 2,
+            "stamp_value": 25000,
+            "total_stamp_value": 50000,
+        }
+        result = format_hints_for_prompt(hints)
+        assert "568,100" in result
+        assert "explicitly stated" in result
+
+
+# ═══════════════════════════════════════════════════════════
+# FIX 5: ownership_history current sale filter
+# ═══════════════════════════════════════════════════════════
+
+class TestFilterCurrentSaleFromHistory:
+    """Tests that current-sale entries are removed from ownership_history."""
+
+    def test_removes_buyer_from_history(self):
+        merged = {
+            "seller": [{"name": "N. Thulasiram", "pan": "ALCPS2485M"}],
+            "buyer": [{"name": "A. Ponnarasi", "pan": "AGUPP4291N"}],
+            "ownership_history": [
+                {"owner": "M. Aarumugam", "acquired_from": "Government", "acquisition_mode": "Settlement"},
+                {"owner": "N. Thulasiram", "acquired_from": "M. Aarumugam", "acquisition_mode": "Sale"},
+                {"owner": "A. Ponnarasi", "acquired_from": "N. Thulasiram", "acquisition_mode": "Sale"},
+            ],
+        }
+        result = _filter_current_sale_from_history(merged)
+        owners = [e["owner"] for e in result["ownership_history"]]
+        assert "A. Ponnarasi" not in owners, f"Buyer should be filtered: {owners}"
+        assert "N. Thulasiram" in owners, "Seller's acquisition should remain"
+        assert "M. Aarumugam" in owners, "Historical owners should remain"
+
+    def test_preserves_seller_in_history(self):
+        merged = {
+            "seller": [{"name": "Raman"}],
+            "buyer": [{"name": "Kumar"}],
+            "ownership_history": [
+                {"owner": "Raman", "acquired_from": "Srinivasan", "acquisition_mode": "Purchase"},
+            ],
+        }
+        result = _filter_current_sale_from_history(merged)
+        assert len(result["ownership_history"]) == 1
+
+    def test_no_history(self):
+        merged = {"seller": [{"name": "A"}], "buyer": [{"name": "B"}], "ownership_history": []}
+        result = _filter_current_sale_from_history(merged)
+        assert result["ownership_history"] == []
+
+    def test_no_buyers(self):
+        merged = {"seller": [], "buyer": [], "ownership_history": [{"owner": "X"}]}
+        result = _filter_current_sale_from_history(merged)
+        assert len(result["ownership_history"]) == 1
+
+
+# ═══════════════════════════════════════════════════════════
+# FIX 1d: Swap guard graceful degradation
+# ═══════════════════════════════════════════════════════════
+
+class TestValidateSellerBuyerGarbageHints:
+    """Tests that swap guard degrades gracefully on garbage hint names."""
+
+    def test_garbage_hints_skip_validation(self):
+        """When >50% of hint names are garbage, no swap should be performed."""
+        merged = {
+            "seller": [{"name": "N. Thulasiram"}],
+            "buyer": [{"name": "A. Ponnarasi"}],
+        }
+        hints = {
+            "seller_names": ["ப்பூர் மாவட்டம்", "ப்பூர் டவுன்", "N. துளசிராம்"],
+            "buyer_names": ["ப்பூர் மாவட்டம்", "ப்பூர் டவுன்", "N. ராதாகிருஷ்ணன்"],
+        }
+        # Majority are garbage → should skip
+        result = _validate_seller_buyer(merged, hints)
+        assert result["seller"][0]["name"] == "N. Thulasiram"
+        assert result["buyer"][0]["name"] == "A. Ponnarasi"
+
+    def test_good_hints_still_detect_swap(self):
+        """When hints are clean, swap detection should still work."""
+        merged = {
+            "seller": [{"name": "A. பொன்அரசி"}],  # actually a buyer
+            "buyer": [{"name": "N. துளசிராம்"}],   # actually a seller
+        }
+        hints = {
+            "seller_names": ["N. துளசிராம்"],
+            "buyer_names": ["A. பொன்அரசி"],
+        }
+        result = _validate_seller_buyer(merged, hints)
+        # Should swap: extracted "sellers" match hint buyers and vice versa
+        assert result["seller"][0]["name"] == "N. துளசிராம்"
+        assert result["buyer"][0]["name"] == "A. பொன்அரசி"
+
+    def test_no_hints_returns_unchanged(self):
+        merged = {"seller": [{"name": "X"}], "buyer": [{"name": "Y"}]}
+        result = _validate_seller_buyer(merged, {})
+        assert result["seller"][0]["name"] == "X"
+        assert result["buyer"][0]["name"] == "Y"

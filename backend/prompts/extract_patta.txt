@@ -42,6 +42,16 @@ CRITICAL — SOIL CLASSIFICATION CODES (மண் வகையும் ரக�
 CRITICAL — OWNER NAMES:
 - In the format "Name1 மனைவி Name2", "மனைவி" means "wife". Name2 is the WIFE and Name1 is the HUSBAND. The owner is Name2 (wife), with father/husband_name = Name1.
 - Example: "என்.துளசிராம் மனைவி சத்தயபாமா" → owner name = "சத்தயபாமா", father_name = "என்.துளசிராம்" (husband).
+- STRICT RULE: If the Patta shows 3 lines of "Husband மனைவி Wife", produce EXACTLY 3 owner entries (one per wife). DO NOT produce 6 entries.
+- DO NOT list the husband as a separate owner. The husband appears ONLY in the father_name field of his wife's entry.
+
+WRONG extraction (DO NOT do this):
+  owner_names: [{"name": "துளசிராம்"}, {"name": "சத்தயபாமா"}, {"name": "ராதாகிருஷ்ணன்"}, {"name": "ராணி"}, ...]
+  ↑ This is WRONG because it lists husbands and wives as separate owners.
+
+CORRECT extraction:
+  owner_names: [{"name": "சத்தயபாமா", "father_name": "துளசிராம்"}, {"name": "ராணி", "father_name": "ராதாகிருஷ்ணன்"}, ...]
+  ↑ Each wife is ONE owner with her husband in father_name.
 
 Return ONLY valid JSON:
 {

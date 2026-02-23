@@ -29,6 +29,14 @@ PAGES 1-3 — SELLER & BUYER IDENTIFICATION:
   - "வசித்து வரும்" = "residing at" → what follows is a PERSON's address, NOT property location
   - "கதவு எண்" = door number → this is a residential address indicator
 
+  CROSS-VALIDATION WITH PRE-PARSE HINTS:
+  - If the pre-parse hints list "Seller Name Candidates" and "Buyer Name Candidates",
+    your extracted seller[].name values MUST match the seller candidates, and your
+    buyer[].name values MUST match the buyer candidates.
+  - If your LLM extraction disagrees with the hint names, RE-CHECK the document
+    structure. The hints are based on the position of "எழுதி வாங்குபவர்" in the text
+    and are HIGH CONFIDENCE. Do NOT swap sellers and buyers.
+
 PAGES 3-5 — PROPERTY SCHEDULE (அட்டவணை / சொத்து விவரம்):
   - Survey number: க.ச. (கணக்கெடுப்பு சர்வே) or S.F.No. / T.S.No. / R.S.No.
   - கிராமம் = Village (PROPERTY location)
@@ -91,8 +99,18 @@ CRITICAL DISAMBIGUATION RULES
 5. JOINT PARTIES (husband + wife / family members):
    - Tamil deeds commonly list related sellers/buyers together:
      "திரு. V. அருள்சிங் அவர்கள் மனைவி திருமதி. A. பொன்அரசி"
-     This means V. அருள்சிங் AND A. பொன்அரசி are BOTH sellers — list EACH as a separate entry.
-   - "மனைவி" (wife), "மகன்" (son), "மகள்" (daughter) between two names = BOTH are parties.
+     This means A. பொன்அரசி is the ACTUAL party and V. அருள்சிங் is mentioned
+     only for identification (as her husband).  Check the deed structure:
+     * If both names appear BEFORE "எழுதிக் கொடுத்த" with separate PAN numbers,
+       BOTH are sellers — list each as a separate entry.
+     * If only ONE PAN number is given and the text says "அவர்கள் மனைவி"
+       (his wife) or "அவர்கள் மகன்" (his son), the PAN holder is the main party.
+       The relative may be a co-party only if explicitly enumerated (e.g., "-(2)").
+     * Do NOT make the husband a seller/buyer just because he is referenced for
+       identification.  "திரு. V. அருள்சிங் அவர்கள் மனைவி" preceding a buyer name
+       means the WIFE is the buyer; the husband is merely her identifier.
+   - "மனைவி" (wife), "மகன்" (son), "மகள்" (daughter) between two names = check whether
+     BOTH are parties or only the second name is the actual party.
    - Each person with a PAN number MUST be a separate seller[] or buyer[] entry.
    - Pattern: "(2)" or "- (2)" after a name group indicates 2 sellers/buyers — count must match.
    - At the signature pages, count the number of distinct signatures/thumb impressions to verify
@@ -150,8 +168,13 @@ FINANCIAL DETAILS:
   Strip commas and produce a plain integer (e.g., 5,67,92,000 → 56792000). NEVER return 0
   when a clear amount is visible on the stamp paper or in the deed text.
 - financials.guideline_value: Government guideline value (0 if not mentioned)
-- financials.stamp_duty: Stamp duty amount (0 if not mentioned)
-  Look for stamp paper denomination (e.g., Rs. 25000 on stamp paper header)
+- financials.stamp_duty: TOTAL stamp duty paid (integer, in ₹)
+  IMPORTANT — many Tamil Nadu sale deeds are printed on MULTIPLE stamp papers.
+  Each stamp sheet has its own serial number (e.g. "A 123456") and denomination (e.g. Rs. 25,000).
+  If the deed spans N stamp sheets each worth ₹D, then stamp_duty = N × D.
+  Example: 6 sheets × ₹25,000 = ₹1,50,000.
+  If the pre-parse hints show "Stamp Sheets Detected" and "Total stamp duty", USE that value.
+  Do NOT report just one sheet's denomination as the full stamp duty.
 - financials.registration_fee: Registration fee (0 if not mentioned)
 
 PREVIOUS OWNERSHIP (immediate previous owner — single object for backward compatibility):
@@ -175,7 +198,15 @@ OWNERSHIP HISTORY (FULL chain from the deed recitals — list all prior transfer
   - acquired_from MUST be filled for EVERY entry. Trace the chain carefully:
     If M. ஆறுமுகம் acquired via deed 89/1992 FROM M. மருதகுட்டி, then acquired_from = "M. மருதகுட்டி"
   - Do NOT include the current BUYERS as ownership_history entries — they are the destination.
+    Example: If seller=N. Thulasiram and buyer=A. Ponnarasi, the LAST ownership_history
+    entry should be "N. Thulasiram" acquiring the property (how the seller got it).
+    Do NOT add an entry where owner=A. Ponnarasi acquired from N. Thulasiram — that is
+    the CURRENT sale, not history.
   - Only include PAST ownership transfers that show how the property reached the current seller.
+  - If a person is mentioned as "husband of buyer" (e.g. "V. அருள்சிங் அவர்கள் மனைவி A. பொன்அரசி"),
+    the husband is NOT a party to the transaction unless explicitly listed as seller or buyer.
+    Only the named buyer (A. பொன்அரசி) should appear in buyer[].  The husband reference is
+    merely identification context.
 
 PROPERTY DESCRIPTION (the verbatim property schedule / அட்டவணை text):
 - property_description: Copy the complete property schedule section as-is from the deed.

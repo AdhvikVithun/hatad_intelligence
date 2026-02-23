@@ -14,6 +14,8 @@ from app.pipeline.sale_deed_preparse import (
     preparse_sale_deed,
     format_hints_for_prompt,
     PreparseHints,
+    extract_party_names_from_section,
+    _is_garbage_name,
 )
 from app.pipeline.utils import name_similarity
 
@@ -239,6 +241,136 @@ def _merge_sale_deed_results(chunk_results: list, total_pages: int) -> dict:
     return merged
 
 
+def _names_overlap(extracted_names: list[str], hint_names: list[str], threshold: float = 0.55) -> bool:
+    """Return True if any extracted name matches any hint name."""
+    for en in extracted_names:
+        for hn in hint_names:
+            if name_similarity(en, hn) >= threshold:
+                return True
+    return False
+
+
+def _validate_seller_buyer(merged: dict, hints: PreparseHints) -> dict:
+    """Post-extraction guard: swap seller/buyer if they contradict preparse hints.
+
+    If the preparse detected seller_names and buyer_names (from document
+    structure), but the LLM placed them in the wrong arrays, swap them.
+
+    Gracefully degrades: if >50% of hint names are garbage (location fragments),
+    skip the validation entirely to avoid corrupting results with bad signals.
+    """
+    hint_sellers = hints.get("seller_names", [])
+    hint_buyers = hints.get("buyer_names", [])
+    if not hint_sellers or not hint_buyers:
+        return merged  # no hint names → can't validate
+
+    # Check hint quality: if most names are garbage, bail out
+    all_hint_names = hint_sellers + hint_buyers
+    garbage_count = sum(1 for n in all_hint_names if _is_garbage_name(n))
+    if garbage_count > len(all_hint_names) * 0.5:
+        logger.warning(
+            "Seller/buyer hint names are mostly garbage (%d/%d) — skipping swap validation.",
+            garbage_count, len(all_hint_names),
+        )
+        return merged
+
+    extracted_sellers = merged.get("seller", [])
+    extracted_buyers = merged.get("buyer", [])
+    if not extracted_sellers or not extracted_buyers:
+        return merged
+
+    # Extract name strings from party dicts
+    def _get_names(party_list: list) -> list[str]:
+        names = []
+        for p in party_list:
+            if isinstance(p, dict):
+                n = p.get("name", "")
+            else:
+                n = str(p)
+            if n:
+                names.append(n)
+        return names
+
+    ex_seller_names = _get_names(extracted_sellers)
+    ex_buyer_names = _get_names(extracted_buyers)
+
+    # Check if extracted sellers match hint sellers (correct assignment)
+    sellers_correct = _names_overlap(ex_seller_names, hint_sellers)
+    buyers_correct = _names_overlap(ex_buyer_names, hint_buyers)
+
+    # Check if they're swapped: extracted sellers match hint buyers
+    sellers_swapped = _names_overlap(ex_seller_names, hint_buyers)
+    buyers_swapped = _names_overlap(ex_buyer_names, hint_sellers)
+
+    if (sellers_swapped and buyers_swapped) and not (sellers_correct or buyers_correct):
+        # Definite swap detected — fix it
+        logger.warning(
+            "PARTY SWAP DETECTED: LLM placed sellers in buyer[] and vice versa. "
+            f"Extracted sellers={ex_seller_names}, hint sellers={hint_sellers}. Swapping."
+        )
+        merged["seller"], merged["buyer"] = merged["buyer"], merged["seller"]
+        existing_remarks = merged.get("remarks", "") or ""
+        merged["remarks"] = (
+            existing_remarks + " | " +
+            "Auto-corrected: seller/buyer arrays were swapped based on preparse section detection."
+        ).strip(" | ")
+
+    return merged
+
+
+def _filter_current_sale_from_history(merged: dict) -> dict:
+    """Remove ownership_history entries where the owner is a current buyer.
+
+    The ownership_history should only contain PAST transfers showing how the
+    property reached the current seller.  The current sale (seller→buyer) is
+    NOT a history entry.  This post-processor enforces that rule.
+    """
+    history = merged.get("ownership_history", [])
+    buyers = merged.get("buyer", [])
+    if not history or not buyers:
+        return merged
+
+    # Build buyer name set
+    buyer_names: list[str] = []
+    for b in buyers:
+        if isinstance(b, dict):
+            n = b.get("name", "")
+        else:
+            n = str(b)
+        if n:
+            buyer_names.append(n)
+
+    if not buyer_names:
+        return merged
+
+    filtered: list[dict] = []
+    for entry in history:
+        if not isinstance(entry, dict):
+            filtered.append(entry)
+            continue
+        owner = (entry.get("owner") or "").strip()
+        if not owner:
+            filtered.append(entry)
+            continue
+        # Check if this owner matches any buyer name
+        is_buyer = False
+        for bn in buyer_names:
+            if name_similarity(owner, bn) >= 0.55:
+                is_buyer = True
+                break
+        if is_buyer:
+            logger.info(
+                "Removed ownership_history entry where owner='%s' matches a buyer (current sale).",
+                owner,
+            )
+        else:
+            filtered.append(entry)
+
+    if len(filtered) != len(history):
+        merged["ownership_history"] = filtered
+    return merged
+
+
 class SaleDeedExtractor(BaseExtractor):
     """Extract transaction and property details from Sale Deeds (text-based).
 
@@ -277,7 +409,7 @@ class SaleDeedExtractor(BaseExtractor):
         # Small document — single-pass (existing behaviour)
         if total_pages <= MAX_CHUNK_PAGES:
             prompt = f"Extract all details from this Sale Deed:\n\n{full_text}"
-            return await call_llm(
+            result = await call_llm(
                 prompt=prompt,
                 system_prompt=system_prompt,
                 expect_json=EXTRACT_SALE_DEED_SCHEMA,
@@ -285,6 +417,8 @@ class SaleDeedExtractor(BaseExtractor):
                 on_progress=on_progress,
                 think=True,
             )
+            result = _validate_seller_buyer(result, hints)
+            return _filter_current_sale_from_history(result)
 
         # Large document — chunk and merge
         chunks = self._create_chunks(pages)
@@ -311,7 +445,9 @@ class SaleDeedExtractor(BaseExtractor):
                 chunk_results.append(e)
                 prior_context = f"[Chunk {i + 1} extraction failed]"
 
-        return _merge_sale_deed_results(chunk_results, total_pages)
+        merged = _merge_sale_deed_results(chunk_results, total_pages)
+        merged = _validate_seller_buyer(merged, hints)
+        return _filter_current_sale_from_history(merged)
 
     # ── Section markers commonly found in Tamil Nadu Sale Deeds ──
     _SECTION_MARKERS = [

@@ -101,19 +101,54 @@ def _extract_property_summary(session_data: dict) -> dict:
                 prop["district"] = data["district"]
             if data.get("patta_number") and prop["patta_number"] == "Not available":
                 prop["patta_number"] = data["patta_number"]
+            # Chitta uses chitta_number instead of patta_number
+            if data.get("chitta_number") and prop["patta_number"] == "Not available":
+                prop["patta_number"] = data["chitta_number"]
             if data.get("total_extent"):
                 patta_total_extents.append(data["total_extent"])
             if data.get("land_classification") and prop["land_classification"] == "Not available":
                 prop["land_classification"] = data["land_classification"]
+            # Handle owner_names (list) or owner_name (string) for new schemas
             for owner in data.get("owner_names", []):
                 name = owner.get("name", "")
                 if name and name not in [o.get("name") for o in prop["owners"]]:
                     prop["owners"].append(owner)
+            if not data.get("owner_names") and data.get("owner_name"):
+                name = data["owner_name"]
+                if name not in [o.get("name") for o in prop["owners"]]:
+                    prop["owners"].append({"name": name, "father_name": data.get("father_name", "")})
             # Collect Patta surveys for deferred processing
             for sn_entry in data.get("survey_numbers", []):
                 sn = sn_entry.get("survey_no", "")
                 if sn:
                     patta_survey_entries.append(sn_entry)
+
+        elif doc_type in ("FMB", "ADANGAL"):
+            if data.get("village") and prop["village"] == "Not available":
+                prop["village"] = data["village"]
+            if data.get("taluk") and prop["taluk"] == "Not available":
+                prop["taluk"] = data["taluk"]
+            if data.get("district") and prop["district"] == "Not available":
+                prop["district"] = data["district"]
+            if data.get("land_classification") and prop["land_classification"] == "Not available":
+                prop["land_classification"] = data["land_classification"]
+            # FMB/Adangal have single survey_number
+            sn = data.get("survey_number", "")
+            if sn and sn not in prop["survey_numbers"]:
+                prop["survey_numbers"].append(sn)
+                if sn not in anchor_surveys:
+                    anchor_surveys.append(sn)
+            if data.get("extent") and prop["extent"] == "Not available":
+                prop["extent"] = data["extent"]
+            if data.get("area_acres") and prop["extent"] == "Not available":
+                prop["extent"] = data["area_acres"]
+            if data.get("boundaries") and not prop["boundaries"]:
+                prop["boundaries"] = data["boundaries"]
+            # Adangal owner_name
+            if data.get("owner_name"):
+                name = data["owner_name"]
+                if name not in [o.get("name") for o in prop["owners"]]:
+                    prop["owners"].append({"name": name, "father_name": data.get("father_name", "")})
 
         elif doc_type == "SALE_DEED":
             p = data.get("property", {})

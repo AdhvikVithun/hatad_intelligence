@@ -49,6 +49,10 @@ TAMIL-SPECIFIC RULES:
 - Tamil numerals: ௧=1 ௨=2 ௩=3 ௪=4 ௫=5 ௬=6 ௭=7 ௮=8 ௯=9. Convert to Arabic numerals.
 - Owner name markers: S/o (மகன்), D/o (மகள்), W/o (மனைவி) — preserve these.
 - "Name1 மனைவி Name2" → owner = Name2 (wife), father_name = Name1 (husband).
+- STRICT RULE: If the Patta table lists 3 rows of "Husband மனைவி Wife", produce EXACTLY 3 owner entries. DO NOT produce 6 entries.
+- DO NOT list the husband as a separate owner. The husband goes ONLY in father_name of the wife's entry.
+- WRONG: [{"name": "Husband1"}, {"name": "Wife1"}, {"name": "Husband2"}, {"name": "Wife2"}] (6 entries from 3 pairs)
+- CORRECT: [{"name": "Wife1", "father_name": "Husband1"}, {"name": "Wife2", "father_name": "Husband2"}] (3 entries)
 - Survey prefixes: Preserve S.F.No., T.S.No., R.S.No., O.S.No., N.S.No.
 - Land types: நன்செய் (nanjai/wet), புன்செய் (punjai/dry), தோட்டம் (garden), மனை (house site).
 

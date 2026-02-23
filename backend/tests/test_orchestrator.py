@@ -183,15 +183,28 @@ class TestDeduplicateChecks:
         llm_check = [c for c in result if c["rule_code"] == "SURVEY_NUMBER_MISMATCH"][0]
         assert llm_check["status"] == "SUPERSEDED"
 
-    def test_llm_det_no_supersede_if_det_passes(self):
-        """LLM FAIL not superseded if deterministic equivalent PASSes."""
+    def test_llm_det_superseded_when_det_passes(self):
+        """LLM FAIL superseded when deterministic equivalent PASSes (false positive override)."""
         checks = [
             {"rule_code": "SURVEY_NUMBER_MISMATCH", "status": "FAIL", "source": "llm"},
             {"rule_code": "DET_SURVEY_MISMATCH", "status": "PASS", "source": "deterministic"},
         ]
         result = _deduplicate_checks(checks)
         llm_check = [c for c in result if c["rule_code"] == "SURVEY_NUMBER_MISMATCH"][0]
-        assert llm_check["status"] == "FAIL"  # Not superseded
+        assert llm_check["status"] == "SUPERSEDED"
+        assert "_override_reason" in llm_check
+
+    def test_sro_det_pass_supersedes_llm_fail(self):
+        """SRO_JURISDICTION LLM FAIL superseded by DET_SRO_JURISDICTION PASS."""
+        checks = [
+            {"rule_code": "SRO_JURISDICTION", "status": "FAIL", "source": "llm"},
+            {"rule_code": "DET_SRO_JURISDICTION", "status": "PASS", "source": "deterministic"},
+        ]
+        result = _deduplicate_checks(checks)
+        llm_check = [c for c in result if c["rule_code"] == "SRO_JURISDICTION"][0]
+        assert llm_check["status"] == "SUPERSEDED"
+        det_check = [c for c in result if c["rule_code"] == "DET_SRO_JURISDICTION"][0]
+        assert det_check["status"] == "PASS"
 
     def test_empty_rule_code_preserved(self):
         """Checks with empty rule_code are always kept."""

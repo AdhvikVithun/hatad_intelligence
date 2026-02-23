@@ -157,8 +157,32 @@ class MemoryBank:
             self._ingest_ec(filename, data)
         elif doc_type == "SALE_DEED":
             self._ingest_sale_deed(filename, data)
-        elif doc_type in ("PATTA", "CHITTA", "A_REGISTER"):
+        elif doc_type == "PATTA":
             self._ingest_patta(filename, data)
+        elif doc_type == "CHITTA":
+            self._ingest_chitta(filename, data)
+        elif doc_type == "A_REGISTER":
+            self._ingest_a_register(filename, data)
+        elif doc_type == "FMB":
+            self._ingest_fmb(filename, data)
+        elif doc_type == "ADANGAL":
+            self._ingest_adangal(filename, data)
+        elif doc_type == "LAYOUT_APPROVAL":
+            self._ingest_layout_approval(filename, data)
+        elif doc_type == "LEGAL_HEIR":
+            self._ingest_legal_heir(filename, data)
+        elif doc_type == "POA":
+            self._ingest_poa(filename, data)
+        elif doc_type == "COURT_ORDER":
+            self._ingest_court_order(filename, data)
+        elif doc_type == "WILL":
+            self._ingest_will(filename, data)
+        elif doc_type == "PARTITION_DEED":
+            self._ingest_partition_deed(filename, data)
+        elif doc_type == "GIFT_DEED":
+            self._ingest_gift_deed(filename, data)
+        elif doc_type == "RELEASE_DEED":
+            self._ingest_release_deed(filename, data)
         else:
             self._ingest_generic(filename, doc_type, data)
 
@@ -432,6 +456,384 @@ class MemoryBank:
             else:
                 self._add_fact("party", "patta_owner", str(owners), src, stype)
 
+    # ── Chitta ingestion ──
+
+    def _ingest_chitta(self, filename: str, data: dict):
+        src = filename
+        stype = "CHITTA"
+
+        self._add_fact("reference", "chitta_number", data.get("chitta_number"), src, stype)
+        self._add_fact("property", "village", data.get("village"), src, stype)
+        self._add_fact("property", "taluk", data.get("taluk"), src, stype)
+        self._add_fact("property", "district", data.get("district"), src, stype)
+        self._add_fact("party", "chitta_owner", data.get("owner_name"), src, stype)
+        self._add_fact("reference", "patta_number", data.get("patta_number"), src, stype)
+        self._add_fact("financial", "tax_assessment", data.get("tax_assessment"), src, stype)
+        self._add_fact("property", "irrigation_source", data.get("irrigation_source"), src, stype)
+
+        # Survey-level soil codes
+        surveys = data.get("survey_numbers", [])
+        if isinstance(surveys, list):
+            for sn in surveys:
+                if isinstance(sn, dict) and sn.get("survey_no"):
+                    self._add_fact("property", "survey_number", sn["survey_no"], src, stype)
+                    self._add_fact("property", f"survey_{sn['survey_no']}_soil_code",
+                                   sn.get("soil_code"), src, stype)
+
+        # Poramboke detection — critical red flag
+        if data.get("is_poramboke"):
+            self._add_fact("risk", "poramboke_detected",
+                           "Chitta records this land as poramboke (government land)",
+                           src, stype)
+
+    # ── A-Register ingestion ──
+
+    def _ingest_a_register(self, filename: str, data: dict):
+        src = filename
+        stype = "A_REGISTER"
+
+        self._add_fact("reference", "a_register_serial", data.get("register_serial_number"), src, stype)
+        self._add_fact("reference", "paguthi_number", data.get("paguthi_number"), src, stype)
+        self._add_fact("property", "village", data.get("village"), src, stype)
+        self._add_fact("property", "taluk", data.get("taluk"), src, stype)
+        self._add_fact("property", "district", data.get("district"), src, stype)
+        self._add_fact("party", "a_register_owner", data.get("owner_name"), src, stype)
+        self._add_fact("reference", "patta_number", data.get("patta_number"), src, stype)
+
+        # Survey numbers
+        surveys = data.get("survey_numbers", [])
+        if isinstance(surveys, list):
+            for sn in surveys:
+                val = sn.get("survey_no", sn) if isinstance(sn, dict) else str(sn)
+                self._add_fact("property", "survey_number", val, src, stype)
+
+        # Mutation entries — the core value of A-Register
+        mutations = data.get("mutation_entries", [])
+        if isinstance(mutations, list):
+            chain = []
+            for m in mutations:
+                if not isinstance(m, dict):
+                    continue
+                self._add_fact("party", "a_register_from", m.get("from_owner"), src, stype,
+                               context=f"Mutation #{m.get('entry_number', '?')}: {m.get('reason', '')}")
+                self._add_fact("party", "a_register_to", m.get("to_owner"), src, stype,
+                               context=f"Mutation #{m.get('entry_number', '?')}: {m.get('reason', '')}")
+                chain.append({
+                    "from": m.get("from_owner", "?"),
+                    "to": m.get("to_owner", "?"),
+                    "type": m.get("reason"),
+                    "date": m.get("date"),
+                    "order": m.get("order_number"),
+                })
+            if chain:
+                self._add_fact("chain", "a_register_mutations", chain, src, stype)
+
+    # ── FMB ingestion ──
+
+    def _ingest_fmb(self, filename: str, data: dict):
+        src = filename
+        stype = "FMB"
+
+        self._add_fact("property", "survey_number", data.get("survey_number"), src, stype)
+        self._add_fact("property", "village", data.get("village"), src, stype)
+        self._add_fact("property", "taluk", data.get("taluk"), src, stype)
+        self._add_fact("property", "fmb_area_acres", data.get("area_acres"), src, stype)
+        self._add_fact("property", "fmb_area_hectares", data.get("area_hectares"), src, stype)
+        self._add_fact("property", "land_classification", data.get("land_classification"), src, stype)
+
+        # Boundaries from FMB
+        boundaries = data.get("boundaries")
+        if isinstance(boundaries, dict):
+            for direction in ("north", "south", "east", "west"):
+                val = boundaries.get(direction)
+                if val:
+                    self._add_fact("property", f"boundary_{direction}", val, src, stype)
+
+        # Dimensions and adjacent surveys
+        dims = data.get("dimensions", [])
+        if isinstance(dims, list) and dims:
+            self._add_fact("property", "fmb_dimensions", dims, src, stype)
+        adj = data.get("adjacent_surveys", [])
+        if isinstance(adj, list) and adj:
+            self._add_fact("property", "adjacent_surveys", adj, src, stype)
+
+    # ── Adangal ingestion ──
+
+    def _ingest_adangal(self, filename: str, data: dict):
+        src = filename
+        stype = "ADANGAL"
+
+        self._add_fact("property", "survey_number", data.get("survey_number"), src, stype)
+        self._add_fact("property", "village", data.get("village"), src, stype)
+        self._add_fact("property", "taluk", data.get("taluk"), src, stype)
+        self._add_fact("property", "district", data.get("district"), src, stype)
+        self._add_fact("party", "adangal_owner", data.get("owner_name"), src, stype)
+        self._add_fact("party", "adangal_tenant", data.get("tenant_name"), src, stype)
+        self._add_fact("property", "extent", data.get("extent"), src, stype)
+        self._add_fact("property", "wet_extent", data.get("wet_extent"), src, stype)
+        self._add_fact("property", "dry_extent", data.get("dry_extent"), src, stype)
+        self._add_fact("property", "soil_type", data.get("soil_type"), src, stype)
+        self._add_fact("property", "irrigation_source", data.get("irrigation_source"), src, stype)
+        self._add_fact("property", "cultivation_status", data.get("cultivation_status"), src, stype)
+        self._add_fact("financial", "assessment_amount", data.get("assessment_amount"), src, stype)
+
+        # Crop details
+        crops = data.get("crop_details", [])
+        if isinstance(crops, list) and crops:
+            self._add_fact("property", "crop_details", crops, src, stype)
+
+        # Poramboke detection from Adangal
+        soil = (data.get("soil_type") or "").lower()
+        if "போரம்போக்கு" in soil or "poramboke" in soil or "அரசு நிலம்" in soil:
+            self._add_fact("risk", "poramboke_detected",
+                           f"Adangal classifies this land as: {data.get('soil_type')}",
+                           src, stype)
+
+    # ── Layout Approval ingestion ──
+
+    def _ingest_layout_approval(self, filename: str, data: dict):
+        src = filename
+        stype = "LAYOUT_APPROVAL"
+
+        self._add_fact("reference", "layout_approval_number", data.get("approval_number"), src, stype)
+        self._add_fact("reference", "layout_authority", data.get("authority"), src, stype)
+        self._add_fact("timeline", "layout_approval_date", data.get("approval_date"), src, stype)
+        self._add_fact("timeline", "layout_validity_period", data.get("validity_period"), src, stype)
+        self._add_fact("property", "layout_status", data.get("status"), src, stype)
+        self._add_fact("property", "layout_total_plots", data.get("total_plots"), src, stype)
+
+        # Survey reference
+        parent_surveys = data.get("parent_survey_numbers")
+        if parent_surveys:
+            self._add_fact("property", "survey_number", parent_surveys, src, stype)
+
+        # Conditions
+        conditions = data.get("conditions", [])
+        if isinstance(conditions, list) and conditions:
+            self._add_fact("encumbrance", "layout_conditions", conditions, src, stype)
+
+        # Expired layout is a risk
+        if data.get("status") == "expired":
+            self._add_fact("risk", "layout_expired",
+                           "Layout approval has expired — plots may not be legally transferable",
+                           src, stype)
+
+    # ── Legal Heir Certificate ingestion ──
+
+    def _ingest_legal_heir(self, filename: str, data: dict):
+        src = filename
+        stype = "LEGAL_HEIR"
+
+        self._add_fact("reference", "legal_heir_cert_number", data.get("certificate_number"), src, stype)
+        self._add_fact("reference", "legal_heir_authority", data.get("issuing_authority"), src, stype)
+        self._add_fact("party", "deceased_person", data.get("deceased_name"), src, stype)
+        self._add_fact("timeline", "date_of_death", data.get("date_of_death"), src, stype)
+
+        # All heirs
+        heirs = data.get("heirs", [])
+        if isinstance(heirs, list):
+            for h in heirs:
+                if isinstance(h, dict):
+                    self._add_fact("party", "legal_heir", h.get("name"), src, stype,
+                                   context=f"Relationship: {h.get('relationship', '?')}, "
+                                           f"Share: {h.get('share_percentage', '?')}")
+                    if h.get("minor"):
+                        self._add_fact("risk", "minor_heir",
+                                       f"Minor heir: {h.get('name')} (guardian: {h.get('guardian', '?')})",
+                                       src, stype)
+
+    # ── POA ingestion ──
+
+    def _ingest_poa(self, filename: str, data: dict):
+        src = filename
+        stype = "POA"
+
+        self._add_fact("reference", "poa_document_number", data.get("document_number"), src, stype)
+        self._add_fact("reference", "sro", data.get("sro"), src, stype)
+        self._add_fact("timeline", "poa_registration_date", data.get("registration_date"), src, stype)
+        self._add_fact("party", "poa_principal", data.get("principal"), src, stype)
+        self._add_fact("party", "poa_agent", data.get("agent"), src, stype)
+        poa_kind = data.get("is_general_or_specific") or data.get("poa_type")
+        self._add_fact("property", "poa_type", poa_kind, src, stype)
+        self._add_fact("property", "poa_revocation_status", data.get("revocation_status"), src, stype)
+
+        # Powers granted
+        powers = data.get("powers_granted", [])
+        if isinstance(powers, list) and powers:
+            self._add_fact("encumbrance", "poa_powers", powers, src, stype)
+
+        # GPA risk flag
+        poa_kind_lower = (str(poa_kind) if poa_kind else "").lower()
+        if poa_kind_lower in ("general", "gpa"):
+            self._add_fact("risk", "general_poa",
+                           "General Power of Attorney detected — GPA sales are not legally recognized "
+                           "(Suraj Lamp Industries v. State of Haryana, 2012)",
+                           src, stype)
+
+    # ── Court Order ingestion ──
+
+    def _ingest_court_order(self, filename: str, data: dict):
+        src = filename
+        stype = "COURT_ORDER"
+
+        self._add_fact("reference", "court_case_number", data.get("case_number"), src, stype)
+        self._add_fact("reference", "court_name", data.get("court_name"), src, stype)
+        self._add_fact("timeline", "court_order_date", data.get("order_date"), src, stype)
+        self._add_fact("party", "court_petitioner", data.get("petitioner"), src, stype)
+        self._add_fact("party", "court_respondent", data.get("respondent"), src, stype)
+        self._add_fact("encumbrance", "court_order_type", data.get("order_type"), src, stype)
+        self._add_fact("encumbrance", "court_order_status", data.get("status"), src, stype)
+        self._add_fact("property", "court_property_affected", data.get("property_affected"), src, stype)
+        self._add_fact("encumbrance", "court_restriction", data.get("restriction_type"), src, stype)
+
+        # Critical risk flags
+        order_type = (data.get("order_type") or "").lower()
+        if order_type in ("injunction", "temporary_injunction", "permanent_injunction"):
+            self._add_fact("risk", "active_injunction",
+                           f"Court injunction ({order_type}) on property — transfer may be prohibited",
+                           src, stype)
+        if order_type == "attachment":
+            self._add_fact("risk", "attachment_order",
+                           "Court attachment order — property is seized/frozen",
+                           src, stype)
+
+    # ── Will ingestion ──
+
+    def _ingest_will(self, filename: str, data: dict):
+        src = filename
+        stype = "WILL"
+
+        self._add_fact("reference", "will_registration", data.get("registration_number"), src, stype)
+        self._add_fact("party", "testator", data.get("testator"), src, stype)
+        self._add_fact("party", "executor", data.get("executor"), src, stype)
+        self._add_fact("timeline", "will_date", data.get("will_date"), src, stype)
+        self._add_fact("encumbrance", "probate_status", data.get("probate_status"), src, stype)
+
+        # Beneficiaries
+        beneficiaries = data.get("beneficiaries", [])
+        if isinstance(beneficiaries, list):
+            for b in beneficiaries:
+                if isinstance(b, dict):
+                    self._add_fact("party", "will_beneficiary", b.get("name"), src, stype,
+                                   context=f"Share: {b.get('share', '?')}, "
+                                           f"Property: {b.get('property_bequeathed', '?')}")
+
+        # Witnesses
+        witnesses = data.get("witnesses", [])
+        if isinstance(witnesses, list):
+            for w in witnesses:
+                if isinstance(w, str) and w.strip():
+                    self._add_fact("party", "witness", w.strip(), src, stype)
+            if len(witnesses) < 2:
+                self._add_fact("risk", "insufficient_will_witnesses",
+                               f"Will has only {len(witnesses)} witness(es) — minimum 2 required",
+                               src, stype)
+
+        # Unregistered Will risk
+        if data.get("is_registered") is False:
+            self._add_fact("risk", "unregistered_will",
+                           "Will is not registered — harder to prove validity",
+                           src, stype)
+
+    # ── Partition Deed ingestion ──
+
+    def _ingest_partition_deed(self, filename: str, data: dict):
+        src = filename
+        stype = "PARTITION_DEED"
+
+        self._add_fact("reference", "partition_deed_number", data.get("document_number"), src, stype)
+        self._add_fact("reference", "sro", data.get("sro"), src, stype)
+        self._add_fact("timeline", "partition_date", data.get("registration_date"), src, stype)
+        self._add_fact("property", "original_property", data.get("original_property"), src, stype)
+        self._add_fact("property", "survey_number", data.get("original_survey_numbers"), src, stype)
+        self._add_fact("property", "village", data.get("village"), src, stype)
+
+        # Joint owners — handle list of dicts or list of strings
+        joint_owners = data.get("joint_owners", [])
+        if isinstance(joint_owners, list):
+            for o in joint_owners:
+                if isinstance(o, dict):
+                    self._add_fact("party", "partition_owner", o.get("name"), src, stype,
+                                   context=f"Original share: {o.get('original_share', '?')}")
+                elif isinstance(o, str) and o.strip():
+                    self._add_fact("party", "partition_owner", o, src, stype)
+
+        # Partitioned shares — check both key names
+        shares = data.get("partitioned_shares") or data.get("shares", [])
+        if isinstance(shares, list):
+            for s in shares:
+                if isinstance(s, dict):
+                    name = s.get("name") or s.get("owner")
+                    survey = s.get("allocated_survey") or s.get("survey")
+                    extent = s.get("allocated_extent") or s.get("extent") or s.get("share")
+                    self._add_fact("chain", "partition_allocation",
+                                   {
+                                       "to": name,
+                                       "survey": survey,
+                                       "extent": extent,
+                                   }, src, stype)
+
+        # Consent flag
+        if data.get("consent_all_parties") is False:
+            self._add_fact("risk", "partition_without_consent",
+                           "Not all parties consented to the partition — may be voidable",
+                           src, stype)
+
+    # ── Gift Deed ingestion ──
+
+    def _ingest_gift_deed(self, filename: str, data: dict):
+        src = filename
+        stype = "GIFT_DEED"
+
+        self._add_fact("reference", "gift_deed_number", data.get("document_number"), src, stype)
+        self._add_fact("reference", "sro", data.get("sro"), src, stype)
+        self._add_fact("timeline", "gift_deed_date", data.get("registration_date"), src, stype)
+        self._add_fact("party", "donor", data.get("donor"), src, stype)
+        self._add_fact("party", "donee", data.get("donee"), src, stype)
+        self._add_fact("property", "gift_property", data.get("property"), src, stype)
+        self._add_fact("property", "survey_number", data.get("survey_number"), src, stype)
+
+        # Consideration should be 0 for genuine gift
+        consideration = data.get("consideration_amount")
+        if consideration and str(consideration).strip() not in ("0", "nil", ""):
+            self._add_fact("risk", "gift_with_consideration",
+                           f"Gift deed has non-zero consideration ({consideration}) — may be disguised sale",
+                           src, stype)
+
+        # Acceptance clause required
+        if not data.get("acceptance_clause"):
+            self._add_fact("risk", "gift_no_acceptance",
+                           "Gift deed missing acceptance clause — gift may be incomplete",
+                           src, stype)
+
+    # ── Release Deed ingestion ──
+
+    def _ingest_release_deed(self, filename: str, data: dict):
+        src = filename
+        stype = "RELEASE_DEED"
+
+        self._add_fact("reference", "release_deed_number", data.get("document_number"), src, stype)
+        self._add_fact("reference", "sro", data.get("sro"), src, stype)
+        self._add_fact("timeline", "release_deed_date", data.get("registration_date"), src, stype)
+        self._add_fact("party", "releasing_party", data.get("releasing_party"), src, stype)
+        self._add_fact("party", "release_beneficiary",
+                       data.get("beneficiary") or data.get("beneficiary_party"), src, stype)
+        self._add_fact("encumbrance", "claim_released", data.get("claim_released"), src, stype)
+
+        # Original document reference — important for EC cross-check
+        orig_raw = data.get("original_document")
+        if isinstance(orig_raw, dict):
+            orig = orig_raw
+        elif isinstance(orig_raw, str) and orig_raw.strip():
+            # Plain string — store as-is
+            orig = {"type": orig_raw, "number": None, "sro": None}
+        else:
+            orig = {}
+        if orig:
+            self._add_fact("reference", "release_original_doc_type", orig.get("type"), src, stype)
+            self._add_fact("reference", "release_original_doc_number", orig.get("number"), src, stype)
+            self._add_fact("reference", "release_original_sro", orig.get("sro"), src, stype)
+
     # ── Generic ingestion ──
 
     def _ingest_generic(self, filename: str, doc_type: str, data: dict):
@@ -679,7 +1081,7 @@ class MemoryBank:
                                 ),
                             ))
 
-        # --- Taluk consistency (fuzzy) ---
+        # --- Taluk consistency (fuzzy, cross-script aware) ---
         taluk_facts = groups.get(("property", "taluk"), [])
         if len(taluk_facts) >= 2:
             by_source_taluk: dict[str, "Fact"] = {}
@@ -693,14 +1095,21 @@ class MemoryBank:
                             str(fact_a.value), str(fact_b.value)
                         )
                         if not matched:
+                            # Downgrade cross-script taluk mismatches
+                            val_a, val_b = str(fact_a.value), str(fact_b.value)
+                            a_tamil = any('\u0B80' <= ch <= '\u0BFF' for ch in val_a)
+                            b_tamil = any('\u0B80' <= ch <= '\u0BFF' for ch in val_b)
+                            cross_script = (a_tamil != b_tamil)
+                            severity = "LOW" if cross_script else "MEDIUM"
                             self.conflicts.append(Conflict(
                                 category="property",
                                 key="taluk",
                                 facts=[fact_a, fact_b],
-                                severity="MEDIUM",
+                                severity=severity,
                                 description=(
                                     f"Taluk differs across documents: "
                                     f"{src_a}={fact_a.value} vs {src_b}={fact_b.value}"
+                                    + (" (cross-script comparison — may be transliteration variant)" if cross_script else "")
                                 ),
                             ))
 

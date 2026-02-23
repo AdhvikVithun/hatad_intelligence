@@ -138,7 +138,7 @@ class TestIngestion:
             "document_number": "COURT-001",
             "key_parties": [{"role": "petitioner", "name": "Raman"}],
         }
-        count = bank.ingest_document("order.pdf", "COURT_ORDER", generic)
+        count = bank.ingest_document("order.pdf", "OTHER", generic)
         assert count > 0
 
 

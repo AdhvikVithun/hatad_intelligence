@@ -290,7 +290,7 @@ def _dedup_survey_numbers(result: dict) -> dict:
     return result
 
 
-def _post_process_patta(result: dict) -> dict:
+def _post_process_patta(result: dict, raw_text: str = "") -> dict:
     """Post-process LLM-extracted Patta data to fix common errors."""
     if not isinstance(result, dict):
         return result
@@ -311,20 +311,112 @@ def _post_process_patta(result: dict) -> dict:
     # Fix 5: Flag implausibly large extents
     _check_extent_plausibility(result)
 
-    # Fix owner_names: LLM sometimes puts wife/husband in father_name field
-    # when the Patta format is "Husband மனைவி Wife". The actual owner is Wife
-    # (the one after மனைவி/W/o), and the father_name should be Husband.
-    for owner in result.get("owner_names", []):
-        if isinstance(owner, dict):
-            name = owner.get("name", "")
-            father = owner.get("father_name", "")
-            # If name looks like a husband and father_name looks like a wife name,
-            # they may be swapped. We can't reliably fix this without more context,
-            # but we can flag it.
-            if name and father and not owner.get("_name_order_verified"):
-                owner["_name_order_verified"] = True
+    # Fix owner_names: Merge husband-wife pairs extracted as separate owners.
+    # Tamil Patta format: "Husband மனைவி Wife" should produce ONE owner entry
+    # (the wife) with father_name = husband.  LLMs often produce TWO entries.
+    _merge_wife_husband_owners(result, raw_text)
 
     return result
+
+
+# ── Regex for "Husband மனைவி Wife" pattern in raw Patta text ──
+_MANAIVI_RE = re.compile(
+    r'([^\n,;]+?)\s+(?:மனைவி|w/o|W/o|wife\s+of)\s+([^\n,;]+)',
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _normalize_owner_key(name: str) -> str:
+    """Lowercase, strip initials/spaces for owner name comparison."""
+    s = name.strip().lower()
+    # Strip single-letter initials like "என்.", "A.", "R."
+    s = re.sub(r'\b[a-zA-Z\u0B80-\u0BFF]\.\s*', '', s)
+    s = re.sub(r'\s+', '', s)
+    return s
+
+
+def _merge_wife_husband_owners(result: dict, raw_text: str = "") -> None:
+    """Merge husband-wife pairs where both were extracted as separate owners.
+
+    Strategy:
+      1. Scan raw_text for "Name1 மனைவி Name2" patterns to find (husband, wife) pairs.
+      2. If no raw text, infer pairs from the owner_names list itself
+         (look for pairs where one has father_name matching another's name).
+      3. For each pair: if both appear as separate owners, remove the husband
+         entry and ensure the wife entry has father_name = husband.
+    """
+    owners = result.get("owner_names", [])
+    if not isinstance(owners, list) or len(owners) < 2:
+        return
+
+    # Build (husband_key, wife_key) pairs from raw text
+    hw_pairs: list[tuple[str, str]] = []
+    if raw_text:
+        for m in _MANAIVI_RE.finditer(raw_text):
+            husband_raw = m.group(1).strip()
+            wife_raw = m.group(2).strip()
+            if husband_raw and wife_raw:
+                hw_pairs.append((_normalize_owner_key(husband_raw),
+                                 _normalize_owner_key(wife_raw)))
+
+    # Fallback: infer pairs from the owners list itself —
+    # if owner A has no father_name and owner B has father_name matching A's name
+    if not hw_pairs:
+        for i, oa in enumerate(owners):
+            if not isinstance(oa, dict):
+                continue
+            a_name = _normalize_owner_key(oa.get("name", ""))
+            if not a_name:
+                continue
+            for j, ob in enumerate(owners):
+                if i == j or not isinstance(ob, dict):
+                    continue
+                b_father = _normalize_owner_key(ob.get("father_name", ""))
+                if b_father and b_father == a_name:
+                    # A is the husband (listed separately), B is the wife with A as father
+                    hw_pairs.append((a_name, _normalize_owner_key(ob.get("name", ""))))
+
+    if not hw_pairs:
+        return
+
+    # Build a set of husband keys to remove and map wife keys → husband name
+    husband_keys_to_remove: set[str] = set()
+    wife_to_husband: dict[str, str] = {}
+    for h_key, w_key in hw_pairs:
+        husband_keys_to_remove.add(h_key)
+        wife_to_husband[w_key] = h_key
+
+    # Find actual husband names (un-normalized) for setting father_name
+    husband_raw_names: dict[str, str] = {}
+    for o in owners:
+        if isinstance(o, dict) and o.get("name"):
+            k = _normalize_owner_key(o["name"])
+            if k in husband_keys_to_remove:
+                husband_raw_names[k] = o["name"].strip()
+
+    # Filter owners: remove husbands, enrich wives with father_name
+    new_owners: list[dict] = []
+    for o in owners:
+        if not isinstance(o, dict):
+            new_owners.append(o)
+            continue
+        name_key = _normalize_owner_key(o.get("name", ""))
+        if name_key in husband_keys_to_remove and name_key not in wife_to_husband:
+            # This is a husband listed separately — skip
+            continue
+        if name_key in wife_to_husband:
+            # This is the wife — ensure father_name is set to husband
+            h_key = wife_to_husband[name_key]
+            if h_key in husband_raw_names:
+                o["father_name"] = husband_raw_names[h_key]
+        new_owners.append(o)
+
+    if len(new_owners) < len(owners):
+        logger.info(
+            f"Patta post-process: merged {len(owners) - len(new_owners)} "
+            f"husband-wife pair(s) — {len(owners)} owners → {len(new_owners)}"
+        )
+        result["owner_names"] = new_owners
 
 
 class PattaExtractor(BaseExtractor):
@@ -346,7 +438,7 @@ class PattaExtractor(BaseExtractor):
             result = await self._extract_single(
                 extracted_text["full_text"], name, on_progress
             )
-            return _post_process_patta(result)
+            return _post_process_patta(result, raw_text=extracted_text.get("full_text", ""))
 
         # Large Patta — concurrent chunking
         chunks = self._create_chunks(pages)
@@ -363,7 +455,7 @@ class PattaExtractor(BaseExtractor):
         chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
 
         merged = _merge_patta_results(chunk_results)
-        return _post_process_patta(merged)
+        return _post_process_patta(merged, raw_text=extracted_text.get("full_text", ""))
 
     async def _extract_single(self, text: str, label: str, on_progress) -> dict:
         prompt = f"Extract all details from this Patta document:\n\n{text}"

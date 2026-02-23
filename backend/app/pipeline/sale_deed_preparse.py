@@ -35,10 +35,15 @@ class PreparseHints(TypedDict, total=False):
     property_district: str            # from மாவட்டம் keyword context
     seller_section: str               # text identified as seller portion
     buyer_section: str                # text identified as buyer portion
+    seller_names: list[str]           # deterministic seller name candidates
+    buyer_names: list[str]            # deterministic buyer name candidates
     previous_deed_date: str           # e.g. "20.01.1992"
     previous_owner: str               # e.g. "M. ஆறுமுகம்"
     property_type: str                # Agricultural / Residential from keywords
-    stamp_value: int | None           # From stamp paper denomination
+    stamp_value: int | None           # From stamp paper denomination (per-sheet)
+    stamp_sheet_count: int            # Number of physical stamp sheets detected
+    total_stamp_value: int | None     # stamp_value × stamp_sheet_count
+    stamp_duty_from_text: int | None  # Explicit stamp duty figure from deed body
     ownership_chain_count: int        # How many prior transfers detected
     payment_mode: str                 # Cash / Cheque / DD / Bank Transfer
     has_encumbrance_declaration: bool  # Whether a free-from-encumbrance clause found
@@ -111,21 +116,54 @@ _RE_SURVEY_ENG = re.compile(
 )
 
 
-def extract_survey_numbers(text: str) -> list[str]:
+def extract_survey_numbers(
+    text: str,
+    schedule_zone: tuple[int, int] | None = None,
+) -> list[str]:
     """Extract survey numbers from OCR text.
 
     Distinguishes survey numbers (க.ச., S.F.No.) from document/registration
     numbers (which use patterns like R/SRO/Book/NNNN/YYYY or NNNN/YY).
-    """
-    found: list[str] = []
 
+    When *schedule_zone* is provided, surveys are extracted from the schedule
+    zone first.  Only if that yields nothing does the function fall back to a
+    full-text scan (with recital-context filtering).
+    """
+    def _scan(region: str) -> list[str]:
+        hits: list[str] = []
+        for pat in [_RE_SURVEY_TAMIL, _RE_SURVEY_ENG]:
+            for m in pat.finditer(region):
+                sn = m.group(1).strip()
+                sn = re.sub(r'\s*/\s*', '/', sn)
+                if sn and sn not in hits:
+                    hits.append(sn)
+        return hits
+
+    # Strategy 1: schedule-zone extraction (deterministic)
+    if schedule_zone:
+        sz_start, sz_end = schedule_zone
+        zone_hits = _scan(text[sz_start:sz_end])
+        if zone_hits:
+            return zone_hits
+
+    # Strategy 2: full-text with recital-context filtering
+    found: list[str] = []
     for pat in [_RE_SURVEY_TAMIL, _RE_SURVEY_ENG]:
         for m in pat.finditer(text):
             sn = m.group(1).strip()
-            # Normalize whitespace around /
             sn = re.sub(r'\s*/\s*', '/', sn)
-            if sn and sn not in found:
-                found.append(sn)
+            if not sn or sn in found:
+                continue
+            # Filter: skip survey numbers near recital markers (historical refs)
+            pos = m.start()
+            window_start = max(0, pos - 300)
+            window_end = min(len(text), pos + 100)
+            window = text[window_start:window_end]
+            if _RE_RECITAL_MARKER.search(window):
+                # Still include if it's also near a schedule / property marker
+                if not (_RE_SCHEDULE_START.search(window) or _RE_PROPERTY_INTRO.search(window)):
+                    continue
+            found.append(sn)
 
     return found
 
@@ -191,6 +229,88 @@ def extract_stamp_value(text: str) -> int | None:
     return None
 
 
+# Stamp paper serial number patterns — OCR may drop/merge the space.
+# "A 123456", "A123456", "a 123456"
+_RE_STAMP_SERIAL = re.compile(
+    r'[A-Za-z]\s*\d{5,8}',
+)
+
+# "Rs. 25,000" or "ரூ 25000" denomination on stamp paper
+_RE_STAMP_DENOM = re.compile(
+    r'(?:Rs\.?|ரூ\.?|₹)\s*([\d,]+)\s*(?:/\s*-)?',
+    re.IGNORECASE,
+)
+
+# Explicit stamp duty amount as stated in the deed text body.
+# "முத்திரைத் தீர்வை ரூ. 5,68,100" or "stamp duty Rs. 568100"
+_RE_STAMP_DUTY_TEXT = re.compile(
+    r'(?:முத்திரை(?:த்)?\s*தீர்வை|stamp\s*duty|முத்திரைத்தாள்\s*(?:கட்டணம்|விலை))'
+    r'\s*(?:ரூ\.?|Rs\.?|₹)\s*([\d,]+)',
+    re.IGNORECASE,
+)
+
+
+def extract_stamp_duty_from_text(text: str) -> int | None:
+    """Extract explicit stamp duty amount from deed body text.
+
+    Returns the parsed integer or None if no explicit mention found.
+    """
+    m = _RE_STAMP_DUTY_TEXT.search(text)
+    if m:
+        raw = m.group(1).replace(',', '')
+        try:
+            val = int(raw)
+            if val >= 1000:  # filter trivial
+                return val
+        except ValueError:
+            pass
+    return None
+
+
+def count_stamp_sheets(text: str) -> tuple[int, int | None]:
+    """Count distinct stamp paper sheets and compute total stamp value.
+
+    Tamil sale deeds printed on multiple stamp sheets each carry their own
+    vendor serial number (e.g. "A 123456").  This function counts those
+    serials and multiplies by the per-sheet denomination.
+
+    Returns:
+        (sheet_count, total_stamp_value) — sheet_count=0 if undetectable.
+    """
+    # Look in first ~8000 chars (multi-sheet deeds can have lengthy headers)
+    header = text[:8000]
+
+    serials = set()
+    for m in _RE_STAMP_SERIAL.finditer(header):
+        serial = m.group(0).strip()
+        # Normalize: remove whitespace to deduplicate "A 123456" vs "A123456"
+        serial_norm = re.sub(r'\s+', '', serial).upper()
+        serials.add(serial_norm)
+
+    sheet_count = len(serials)
+
+    # Find denomination (typically on first stamp sheet)
+    per_sheet: int | None = None
+    dm = _RE_STAMP_DENOM.search(header)
+    if dm:
+        raw = dm.group(1).replace(',', '')
+        try:
+            val = int(raw)
+            # Filter out tiny amounts that are NOT stamp denominations
+            if val >= 100:
+                per_sheet = val
+        except ValueError:
+            pass
+
+    if sheet_count >= 2 and per_sheet:
+        return sheet_count, sheet_count * per_sheet
+    elif sheet_count == 1 and per_sheet:
+        return 1, per_sheet
+    elif per_sheet:
+        return 0, per_sheet  # count unknown but denomination found
+    return 0, None
+
+
 # ═══════════════════════════════════════════════════
 # SELLER / BUYER SECTION DETECTION
 # ═══════════════════════════════════════════════════
@@ -248,6 +368,63 @@ def detect_seller_buyer_sections(text: str) -> tuple[str, str]:
 
 
 # ═══════════════════════════════════════════════════
+# SELLER / BUYER NAME EXTRACTION FROM SECTIONS
+# ═══════════════════════════════════════════════════
+
+# Tamil honorific name pattern: திரு./திருமதி. + Initial + Name
+_RE_TAMIL_NAME = re.compile(
+    r'(?:திரு(?:மதி)?\.?\s*|Thiru(?:mathi)?\.?\s*|Mr\.?\s*|Mrs\.?\s*|Sri\.?\s*|Smt\.?\s*)'
+    r'([A-Za-z\u0B80-\u0BFF][\w\s.\u0B80-\u0BFF]{1,40}?)(?:\s+அவர்கள்|\s+S/o|\s+D/o|\s+W/o|\s+மகன்|\s+மகள்|\s+மனைவி|\s*,|\s*\n)',
+    re.IGNORECASE,
+)
+
+# Location keywords that should NEVER appear in a person's name.
+# Names containing any of these are garbage captures from address text.
+_LOCATION_BLOCKLIST: set[str] = {
+    'மாவட்டம்', 'தாலூக்கா', 'தாலூக்', 'கிராமம்', 'கிராம',
+    'நகரம்', 'டவுன்', 'வட்டம்', 'பேட்டை', 'நகர்', 'மண்டலம்',
+    'ஊராட்சி', 'மாநகரம்', 'மாவட்ட', 'பகுதி', 'ரோடு', 'வீதி',
+    'எக்ஸ்டென்சன்', 'லேஅவுட்', 'district', 'taluk', 'town',
+    'village', 'nagar', 'road', 'street', 'extension', 'layout',
+    'இலக்கமிட்ட', 'விலாசத்தில்', 'வசித்து',
+}
+
+
+def _is_garbage_name(name: str) -> bool:
+    """Return True if *name* looks like an address fragment, not a person's name."""
+    lower = name.lower()
+    # Reject if any blocklist word appears anywhere in the name
+    for bw in _LOCATION_BLOCKLIST:
+        if bw.lower() in lower:
+            return True
+    # Reject very short captures that are honourific fragments (e.g. "மதி")
+    # A real Tamil name has at least one initial-dot or multi-word structure.
+    alpha_chars = sum(1 for c in name if c.isalpha() or '\u0B80' <= c <= '\u0BFF')
+    if alpha_chars < 4:
+        return True
+    return False
+
+
+def extract_party_names_from_section(section_text: str) -> list[str]:
+    """Extract person names from a seller or buyer section using honorifics.
+
+    Returns a list of cleaned names found in the text.  Filters out garbage
+    captures that contain location keywords (மாவட்டம், டவுன், etc.).
+    """
+    names: list[str] = []
+    for m in _RE_TAMIL_NAME.finditer(section_text):
+        name = m.group(1).strip()
+        # Clean trailing junk
+        name = re.sub(r'[\s,;.\-]+$', '', name)
+        if not name or len(name) <= 2 or name in names:
+            continue
+        if _is_garbage_name(name):
+            continue
+        names.append(name)
+    return names
+
+
+# ═══════════════════════════════════════════════════
 # PROPERTY LOCATION EXTRACTION  (village / taluk / district)
 # ═══════════════════════════════════════════════════
 
@@ -296,19 +473,108 @@ _RE_VILLAGE_ENG = re.compile(
 )
 
 
+# Compiled once at module level for efficiency
+_ADDRESS_MARKERS_RE = re.compile(
+    r'வசித்து\s*வரும்|கதவு\s*எண்|வீட்டில்|door\s*no|residing\s*at|'
+    r'முகவரி|address',
+    re.IGNORECASE,
+)
+
+
+def _is_near_address_marker(text: str, match_start: int, radius: int = 500) -> bool:
+    """Return True if ``match_start`` is within ``radius`` chars of an address marker.
+
+    Address markers indicate a *person's residential address* — any village /
+    taluk / district keyword found near them is NOT the property location.
+    Radius default raised to 500 because Tamil deed address blocks often span
+    300-400 chars across multiple lines (name + father + door + street + district).
+    """
+    window_start = max(0, match_start - radius)
+    window_end = min(len(text), match_start + radius)
+    return bool(_ADDRESS_MARKERS_RE.search(text[window_start:window_end]))
+
+
+# Schedule-section markers that delimit the property description block
+_RE_SCHEDULE_START = re.compile(
+    r'(?:அட்டவணை|சொத்து\s*விவரம்|property\s*schedule|schedule\s*of\s*property)',
+    re.IGNORECASE,
+)
+
+# Property-description intro markers (less formal than schedule headers)
+_RE_PROPERTY_INTRO = re.compile(
+    r'(?:கீழ்க்கண்ட\s*சொத்து|கீழ்கண்ட\s*சொத்து|below\s*mentioned\s*property|'
+    r'property\s*more\s*fully\s*described|சொத்தின்\s*விவரம்)',
+    re.IGNORECASE,
+)
+
+# Recital markers — survey numbers found near these are historical, not current
+_RE_RECITAL_MARKER = re.compile(
+    r'(?:பட்டா\s*எண்|patta\s*no|previously|earlier\s*deed|முன்பு|'
+    r'முந்தைய|பழைய\s*பத்திரம்|கிரையப்\s*பத்திரம்\s*எழுதிக்)',
+    re.IGNORECASE,
+)
+
+
+def _find_schedule_zone(text: str) -> tuple[int, int] | None:
+    """Return (start, end) of the property schedule zone, or None.
+
+    The schedule zone starts at an அட்டவணை/schedule marker and ends at the
+    next clearly unrelated section (signatures, witnesses) or extends 2000
+    chars, whichever comes first.
+    """
+    m = _RE_SCHEDULE_START.search(text)
+    if not m:
+        return None
+
+    start = m.start()
+    # End markers: signatures, witnesses, or next major section
+    end_markers = re.compile(
+        r'(?:சாட்சிகள்|எழுதிக் கொடுப்பவர்|witness|signature)',
+        re.IGNORECASE,
+    )
+    em = end_markers.search(text[start + 100:])  # skip a bit past the header
+    if em:
+        end = start + 100 + em.start()
+    else:
+        end = min(len(text), start + 2000)
+    return start, end
+
+
 def extract_property_location(text: str) -> tuple[str, str, str]:
     """Extract property village, taluk, district from text.
 
     Avoids confusion with residential addresses by:
-    - Preferring text near survey number markers (க.ச., S.F.No.)
-    - Ignoring text near "வசித்து வரும்" (residing at) or "கதவு எண்" (door no.)
+    - Strategy 0: If a property schedule zone is found, search ONLY there first.
+    - Strategy 1: Preferring text near survey number markers (க.ச., S.F.No.)
+      and filtering out matches within ±200 chars of address markers.
+    - Strategy 2: Global search excluding address-context lines.
     """
     village = ""
     taluk = ""
     district = ""
 
-    # Strategy 1: Look near survey number markers for property location
-    # Find positions of survey markers
+    # ── Strategy 0: Property schedule zone ──
+    schedule_zone = _find_schedule_zone(text)
+    if schedule_zone:
+        sz_start, sz_end = schedule_zone
+        sz_text = text[sz_start:sz_end]
+        for pat_v in [_RE_VILLAGE_BEFORE, _RE_VILLAGE, _RE_VILLAGE_LOC]:
+            if not village:
+                mv = pat_v.search(sz_text)
+                if mv:
+                    village = _clean_location(mv.group(1))
+        for pat_t in [_RE_TALUK_BEFORE, _RE_TALUK]:
+            if not taluk:
+                mt = pat_t.search(sz_text)
+                if mt:
+                    taluk = _clean_location(mt.group(1))
+        for pat_d in [_RE_DISTRICT_BEFORE, _RE_DISTRICT]:
+            if not district:
+                md = pat_d.search(sz_text)
+                if md:
+                    district = _clean_location(md.group(1))
+
+    # ── Strategy 1: Near survey markers (with address proximity filter) ──
     survey_marker_positions: list[int] = []
     for pat in [_RE_SURVEY_TAMIL, _RE_SURVEY_ENG]:
         for m in pat.finditer(text):
@@ -323,42 +589,76 @@ def extract_property_location(text: str) -> tuple[str, str, str]:
         if not village:
             # Try "VillageName கிராமம்" first (most common Tamil form)
             m = _RE_VILLAGE_BEFORE.search(window)
-            if m:
+            if m and not _is_near_address_marker(text, window_start + m.start()):
                 village = _clean_location(m.group(1))
             else:
                 m = _RE_VILLAGE.search(window)
-                if m:
+                if m and not _is_near_address_marker(text, window_start + m.start()):
                     village = _clean_location(m.group(1))
                 else:
                     m = _RE_VILLAGE_LOC.search(window)
-                    if m:
+                    if m and not _is_near_address_marker(text, window_start + m.start()):
                         village = _clean_location(m.group(1))
 
         if not taluk:
             m = _RE_TALUK_BEFORE.search(window)
-            if m:
+            if m and not _is_near_address_marker(text, window_start + m.start()):
                 taluk = _clean_location(m.group(1))
             else:
                 m = _RE_TALUK.search(window)
-                if m:
+                if m and not _is_near_address_marker(text, window_start + m.start()):
                     taluk = _clean_location(m.group(1))
         if not district:
             m = _RE_DISTRICT_BEFORE.search(window)
-            if m:
+            if m and not _is_near_address_marker(text, window_start + m.start()):
                 district = _clean_location(m.group(1))
             else:
                 m = _RE_DISTRICT.search(window)
-                if m:
+                if m and not _is_near_address_marker(text, window_start + m.start()):
                     district = _clean_location(m.group(1))
 
-    # Strategy 2: Global search but exclude address contexts
+    # ── Strategy 1.5: Property description intro zone ──
+    # If no schedule marker, look for property-intro phrases
+    if not (village and taluk and district) and not schedule_zone:
+        pin = _RE_PROPERTY_INTRO.search(text)
+        if pin:
+            pz_start = pin.start()
+            pz_end = min(len(text), pz_start + 1500)
+            pz_text = text[pz_start:pz_end]
+            for pat_v in [_RE_VILLAGE_BEFORE, _RE_VILLAGE, _RE_VILLAGE_LOC]:
+                if not village:
+                    mv = pat_v.search(pz_text)
+                    if mv:
+                        village = _clean_location(mv.group(1))
+            for pat_t in [_RE_TALUK_BEFORE, _RE_TALUK]:
+                if not taluk:
+                    mt = pat_t.search(pz_text)
+                    if mt:
+                        taluk = _clean_location(mt.group(1))
+            for pat_d in [_RE_DISTRICT_BEFORE, _RE_DISTRICT]:
+                if not district:
+                    md = pat_d.search(pz_text)
+                    if md:
+                        district = _clean_location(md.group(1))
+
+    # Strategy 2: Global search but exclude address contexts (multi-line window)
     address_markers = ['வசித்து வரும்', 'கதவு எண்', 'வீட்டில்', 'door no']
     lines = text.split('\n')
 
-    for line in lines:
-        line_lower = line.lower()
-        # Skip lines that look like personal addresses
-        if any(am.lower() in line_lower for am in address_markers):
+    def _is_address_line(idx: int) -> bool:
+        """Check line *idx* AND preceding 3 lines for address markers."""
+        for offset in range(4):  # current line + 3 lines above
+            li = idx - offset
+            if li < 0:
+                break
+            ll = lines[li].lower()
+            if any(am.lower() in ll for am in address_markers):
+                return True
+        return False
+
+    for li, line in enumerate(lines):
+        # Skip lines whose multi-line window contains address markers
+        if _is_address_line(li):
             continue
 
         if not village:
@@ -596,8 +896,9 @@ def preparse_sale_deed(full_text: str) -> PreparseHints:
     if sro:
         hints["sro"] = sro
 
-    # Survey numbers
-    surveys = extract_survey_numbers(full_text)
+    # Survey numbers (prefer schedule zone)
+    schedule_zone = _find_schedule_zone(full_text)
+    surveys = extract_survey_numbers(full_text, schedule_zone=schedule_zone)
     if surveys:
         hints["survey_numbers"] = surveys
 
@@ -616,6 +917,21 @@ def preparse_sale_deed(full_text: str) -> PreparseHints:
     if stamp:
         hints["stamp_value"] = stamp
 
+    # Stamp sheet counting (multi-sheet deeds)
+    sheet_count, total_stamp = count_stamp_sheets(full_text)
+    if sheet_count >= 2:
+        hints["stamp_sheet_count"] = sheet_count
+        if total_stamp:
+            hints["total_stamp_value"] = total_stamp
+    elif total_stamp and not stamp:
+        # count_stamp_sheets found denomination but extract_stamp_value didn't
+        hints["stamp_value"] = total_stamp
+
+    # Explicit stamp duty from deed body text (highest priority)
+    explicit_stamp_duty = extract_stamp_duty_from_text(full_text)
+    if explicit_stamp_duty:
+        hints["stamp_duty_from_text"] = explicit_stamp_duty
+
     # Property location
     village, taluk, district = extract_property_location(full_text)
     if village:
@@ -631,6 +947,16 @@ def preparse_sale_deed(full_text: str) -> PreparseHints:
         hints["seller_section"] = seller_sec
     if buyer_sec:
         hints["buyer_section"] = buyer_sec
+
+    # Extract actual party names from sections (deterministic anchoring)
+    if seller_sec:
+        seller_names = extract_party_names_from_section(seller_sec)
+        if seller_names:
+            hints["seller_names"] = seller_names
+    if buyer_sec:
+        buyer_names = extract_party_names_from_section(buyer_sec)
+        if buyer_names:
+            hints["buyer_names"] = buyer_names
 
     # Previous ownership
     prev_date, prev_owner = extract_previous_ownership(full_text)
@@ -721,6 +1047,26 @@ def format_hints_for_prompt(hints: PreparseHints) -> str:
         lines.append(f"  Seller/Buyer Role Detection:")
         lines.append(f"    → Text BEFORE 'எழுதி வாங்குபவர்' contains SELLER names/addresses")
         lines.append(f"    → Text AFTER 'எழுதி வாங்குபவர்' contains BUYER names/addresses")
+        if hints.get("seller_names"):
+            lines.append(f"  Seller Name Candidates: {', '.join(hints['seller_names'])}")
+            lines.append(f"    → These names were found in the SELLER section — they MUST appear in seller[]")
+        if hints.get("buyer_names"):
+            lines.append(f"  Buyer Name Candidates: {', '.join(hints['buyer_names'])}")
+            lines.append(f"    → These names were found in the BUYER section — they MUST appear in buyer[]")
+
+    if hints.get("stamp_duty_from_text"):
+        lines.append(f"  Stamp Duty (from deed text): \u20b9{hints['stamp_duty_from_text']:,}")
+        lines.append(f"    \u2192 Use {hints['stamp_duty_from_text']} as financials.stamp_duty (explicitly stated in the deed)")
+    elif hints.get("stamp_sheet_count") and hints["stamp_sheet_count"] >= 2:
+        lines.append(f"  Stamp Sheets Detected: {hints['stamp_sheet_count']} physical stamp papers")
+        if hints.get("stamp_value"):
+            lines.append(f"    → Per-sheet denomination: ₹{hints['stamp_value']:,}")
+        if hints.get("total_stamp_value"):
+            lines.append(f"    → Total stamp duty = {hints['stamp_sheet_count']} × ₹{hints.get('stamp_value', 0):,} = ₹{hints['total_stamp_value']:,}")
+            lines.append(f"    → Use {hints['total_stamp_value']} as financials.stamp_duty (NOT just one sheet)")
+    elif hints.get("stamp_value"):
+        lines.append(f"  Stamp Paper Denomination: ₹{hints['stamp_value']:,}")
+        lines.append(f"    → If deed is printed on MULTIPLE stamp sheets, multiply by sheet count")
 
     if hints.get("previous_deed_date"):
         lines.append(f"  Previous Deed Date: {hints['previous_deed_date']}")

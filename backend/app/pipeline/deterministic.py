@@ -307,12 +307,28 @@ def check_stamp_duty(extracted_data: dict) -> list[dict]:
             if stamp_duty_paid < expected_stamp * 0.95:
                 shortfall = expected_stamp - stamp_duty_paid
                 shortfall_pct = (shortfall / expected_stamp) * 100
+
+                # Common single-sheet stamp denominations in Tamil Nadu
+                _COMMON_STAMP_DENOMS = {100, 500, 1000, 5000, 10000, 15000, 20000, 25000, 50000}
+                multi_sheet_note = ""
+                if stamp_duty_paid in _COMMON_STAMP_DENOMS and shortfall_pct > 80:
+                    # Likely the extractor only counted one stamp sheet
+                    possible_sheets = round(expected_stamp / stamp_duty_paid) if stamp_duty_paid else 0
+                    multi_sheet_note = (
+                        f" NOTE: The stamp duty paid (₹{stamp_duty_paid:,.0f}) matches a common "
+                        f"single-sheet denomination. If the deed is printed on ~{possible_sheets} "
+                        f"stamp sheets, total stamp duty may actually be "
+                        f"₹{stamp_duty_paid * possible_sheets:,.0f}. "
+                        f"Verify the physical stamp sheet count before concluding shortfall."
+                    )
+
                 checks.append(_make_check(
                     "DET_STAMP_DUTY_SHORT", "Stamp Duty Shortfall Detected",
                     "HIGH", "FAIL",
                     f"Stamp duty paid (₹{stamp_duty_paid:,.0f}) appears insufficient. "
                     f"Expected ₹{expected_stamp:,.0f} (7% of ₹{assessable_value:,.0f}). "
-                    f"Shortfall: ₹{shortfall:,.0f} ({shortfall_pct:.1f}%).",
+                    f"Shortfall: ₹{shortfall:,.0f} ({shortfall_pct:.1f}%)."
+                    + multi_sheet_note,
                     "Verify stamp duty calculation with the registrar. Shortfall may result "
                     "in penalties or document being impounded under TN Stamp Act.",
                     f"[{filename}] consideration=₹{consideration:,.0f}, "
@@ -1691,6 +1707,117 @@ def check_financial_scale_anomalies(extracted_data: dict) -> list[dict]:
 
 
 # ═══════════════════════════════════════════════════
+# 8b. DETERMINISTIC SRO JURISDICTION CHECK
+# ═══════════════════════════════════════════════════
+
+def check_sro_jurisdiction(extracted_data: dict) -> list[dict]:
+    """Deterministic SRO jurisdiction check using the known SRO→District mapping.
+
+    The LLM's SRO_JURISDICTION check frequently fires false positives (e.g.,
+    confusing the seller's residential address with the property location).
+    This deterministic check calls the same verify_sro_jurisdiction() tool
+    and, when the mapping is conclusive, emits a PASS or FAIL that supersedes
+    the LLM result via the dedup mechanism.
+    """
+    from app.pipeline.tools import verify_sro_jurisdiction
+
+    checks: list[dict] = []
+
+    # Collect SRO, district, and village from extracted data
+    sro_values: list[str] = []
+    district_values: list[str] = []
+    village_values: list[str] = []
+
+    for filename, entry in extracted_data.items():
+        doc_type = entry.get("document_type", "")
+        d = entry.get("data", {})
+
+        if doc_type == "SALE_DEED":
+            prop = d.get("property", {}) or {}
+            sro = d.get("sro") or d.get("registration_office") or ""
+            if not sro:
+                # Try to extract SRO from document_number (e.g. R/Vadavalli/...)
+                doc_num = d.get("document_number", "") or ""
+                parts = doc_num.split("/")
+                if len(parts) >= 2 and parts[0] in ("R", "r"):
+                    sro = parts[1]
+            if sro and isinstance(sro, str):
+                sro_values.append(sro.strip())
+            dist = prop.get("district", "")
+            if dist and isinstance(dist, str):
+                district_values.append(dist.strip())
+            vill = prop.get("village", "")
+            if vill and isinstance(vill, str):
+                village_values.append(vill.strip())
+
+        elif doc_type == "EC":
+            sro = d.get("sro") or d.get("issuing_office") or ""
+            if sro and isinstance(sro, str):
+                sro_values.append(sro.strip())
+            dist = d.get("district", "")
+            if dist and isinstance(dist, str):
+                district_values.append(dist.strip())
+            vill = d.get("village", "")
+            if vill and isinstance(vill, str):
+                village_values.append(vill.strip())
+
+        elif doc_type in ("PATTA", "A_REGISTER"):
+            dist = d.get("district", "")
+            if dist and isinstance(dist, str):
+                district_values.append(dist.strip())
+            vill = d.get("village", "")
+            if vill and isinstance(vill, str):
+                village_values.append(vill.strip())
+
+    if not sro_values or not district_values:
+        return checks
+
+    # Use the first non-empty SRO and district
+    sro = sro_values[0]
+    district = district_values[0]
+    village = village_values[0] if village_values else ""
+
+    try:
+        result = verify_sro_jurisdiction(
+            sro_name=sro, district=district, village=village,
+        )
+    except Exception as e:
+        logger.warning(f"check_sro_jurisdiction: tool call failed: {e}")
+        return checks
+
+    valid = result.get("jurisdiction_valid")
+    confidence = (result.get("confidence") or "").lower()
+
+    if valid is True and confidence in ("high", "medium"):
+        checks.append(_make_check(
+            "DET_SRO_JURISDICTION",
+            "SRO Jurisdiction Check (Deterministic)",
+            "CRITICAL", "PASS",
+            f"SRO '{sro}' is confirmed to have jurisdiction over "
+            f"{village or district} ({district} district). "
+            f"Confidence: {confidence}. {result.get('note', '')}",
+            "No action needed — SRO jurisdiction verified.",
+            f"SRO={sro}, District={district}, Village={village}, "
+            f"jurisdiction_valid=True, confidence={confidence}",
+        ))
+    elif valid is False and confidence == "high":
+        checks.append(_make_check(
+            "DET_SRO_JURISDICTION",
+            "SRO Jurisdiction Check (Deterministic)",
+            "CRITICAL", "FAIL",
+            f"SRO '{sro}' does NOT have jurisdiction over {district} district. "
+            f"{result.get('note', '')}",
+            "Verify that documents are registered at the correct SRO "
+            "for the property's location.",
+            f"SRO={sro}, District={district}, Village={village}, "
+            f"jurisdiction_valid=False, confidence={confidence}",
+        ))
+    # Low-confidence / inconclusive: don't emit — let LLM handle
+
+    return checks
+
+
+# ═══════════════════════════════════════════════════
 # 9. MULTI-VILLAGE / GEOGRAPHICAL BOUNDARY DETECTION
 # ═══════════════════════════════════════════════════
 
@@ -2264,6 +2391,894 @@ def check_hallucination_signs(extracted_data: dict) -> list[dict]:
 
 
 # ═══════════════════════════════════════════════════
+# 9. BOUNDARY ADJACENCY CHECK — FMB ↔ Sale Deed
+# ═══════════════════════════════════════════════════
+
+# Physical features that constitute undisclosed encumbrances / risk
+_PHYSICAL_FEATURES = [
+    "water channel", "canal", "nala", "nallah", "drainage", "drain",
+    "river", "stream", "tank", "pond", "lake", "well",
+    "road", "pathway", "cart track", "footpath", "highway",
+    "railway", "rail line", "power line", "ht line", "electric",
+    "government land", "govt land", "poramboke", "poramboku",
+    "burial ground", "cremation", "temple", "church", "mosque",
+    "sewage", "sewer", "pipeline",
+]
+
+# Tamil equivalents of physical features
+_PHYSICAL_FEATURES_TAMIL = [
+    "வாய்க்கால்", "கால்வாய்", "நீர்வழி", "ஓடை",
+    "சாலை", "பாதை", "தெரு", "ரோடு",
+    "ரயில்", "மின்சார", "அரசு நிலம்", "புறம்போக்கு",
+    "குளம்", "ஏரி", "கிணறு", "ஆறு",
+]
+
+_DIRECTIONS = ["north", "south", "east", "west"]
+
+
+def _normalize_boundary(text: str) -> str:
+    """Lowercase, strip punctuation, collapse whitespace for boundary comparison."""
+    if not text or not isinstance(text, str):
+        return ""
+    text = text.lower().strip()
+    text = re.sub(r'[^\w\s]', ' ', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+
+def _has_physical_feature(text: str) -> list[str]:
+    """Return list of physical feature keywords found in the text."""
+    norm = _normalize_boundary(text)
+    found = []
+    for feat in _PHYSICAL_FEATURES:
+        if feat in norm:
+            found.append(feat)
+    # Check Tamil features too
+    if isinstance(text, str):
+        for feat in _PHYSICAL_FEATURES_TAMIL:
+            if feat in text:
+                found.append(feat)
+    return found
+
+
+def check_boundary_adjacency(extracted_data: dict) -> list[dict]:
+    """Cross-check boundaries between FMB and Sale Deed.
+
+    Detects:
+      1. Contradictory boundaries (same direction has incompatible descriptions)
+      2. Undisclosed physical encumbrances (FMB shows water channel / road /
+         Government land that Sale Deed boundary omits)
+    """
+    checks: list[dict] = []
+
+    # Collect boundaries from Sale Deed(s) and FMB(s)
+    sd_boundaries: list[tuple[str, dict]] = []  # (filename, {north, south, east, west})
+    fmb_boundaries: list[tuple[str, dict]] = []
+
+    for filename, doc in extracted_data.items():
+        if not isinstance(doc, dict):
+            continue
+        doc_type = doc.get("document_type", "")
+        d = doc.get("data", {})
+
+        if doc_type == "SALE_DEED":
+            prop = d.get("property", {})
+            if isinstance(prop, dict):
+                bounds = prop.get("boundaries", {})
+                if isinstance(bounds, dict) and any(bounds.get(dir_) for dir_ in _DIRECTIONS):
+                    sd_boundaries.append((filename, bounds))
+
+        elif doc_type == "FMB":
+            bounds = d.get("boundaries", {})
+            if isinstance(bounds, dict) and any(bounds.get(dir_) for dir_ in _DIRECTIONS):
+                fmb_boundaries.append((filename, bounds))
+
+    # If we don't have both FMB and Sale Deed boundaries, skip
+    if not sd_boundaries or not fmb_boundaries:
+        return checks
+
+    # Compare each FMB ↔ Sale Deed pair
+    for sd_fn, sd_bounds in sd_boundaries:
+        for fmb_fn, fmb_bounds in fmb_boundaries:
+            mismatches: list[str] = []
+
+            for direction in _DIRECTIONS:
+                sd_val = _normalize_boundary(sd_bounds.get(direction, ""))
+                fmb_val = _normalize_boundary(fmb_bounds.get(direction, ""))
+
+                if not sd_val or not fmb_val:
+                    continue
+
+                # Check for contradictory descriptions:
+                # Road vs owner name, river vs survey number, etc.
+                sd_features = _has_physical_feature(sd_bounds.get(direction, ""))
+                fmb_features = _has_physical_feature(fmb_bounds.get(direction, ""))
+
+                # If both have content but one mentions a physical feature the other
+                # doesn't, and the other mentions a person/survey instead — flag
+                if fmb_features and not sd_features:
+                    # FMB shows physical feature, Sale Deed doesn't mention it at all
+                    # This is a boundary description mismatch
+                    mismatches.append(
+                        f"{direction.title()}: FMB shows '{fmb_bounds.get(direction, '')}' "
+                        f"(contains {', '.join(fmb_features)}), "
+                        f"Sale Deed shows '{sd_bounds.get(direction, '')}'"
+                    )
+
+            if mismatches:
+                checks.append(_make_check(
+                    "DET_BOUNDARY_MISMATCH",
+                    "FMB ↔ Sale Deed Boundary Mismatch",
+                    "HIGH", "WARNING",
+                    f"Boundary descriptions differ between FMB and Sale Deed: "
+                    f"{'; '.join(mismatches)}. "
+                    f"FMB is the government survey record and is more authoritative "
+                    f"for physical features.",
+                    "Physically inspect the property to confirm actual boundaries. "
+                    "Obtain a recent FMB sketch and verify all four boundaries "
+                    "match the Sale Deed schedule.",
+                    f"[{sd_fn} vs {fmb_fn}] {len(mismatches)} direction(s) differ",
+                ))
+
+            # ── Check 2: Undisclosed physical encumbrances from FMB ──
+            all_fmb_features: list[str] = []
+            all_sd_features: list[str] = []
+            for direction in _DIRECTIONS:
+                all_fmb_features.extend(_has_physical_feature(fmb_bounds.get(direction, "")))
+                all_sd_features.extend(_has_physical_feature(sd_bounds.get(direction, "")))
+
+            # Features in FMB but not in Sale Deed = undisclosed
+            undisclosed = set(all_fmb_features) - set(all_sd_features)
+            if undisclosed:
+                checks.append(_make_check(
+                    "DET_UNDISCLOSED_ENCUMBRANCE",
+                    "Physical Feature in FMB Not Disclosed in Sale Deed",
+                    "MEDIUM", "WARNING",
+                    f"FMB boundaries mention physical feature(s) not found in "
+                    f"Sale Deed: {', '.join(sorted(undisclosed))}. "
+                    f"Features like water channels, roads, or Government land "
+                    f"adjacent to the property may affect usage, access, or value.",
+                    "Verify actual boundary conditions with a site inspection. "
+                    "Confirm whether the physical feature(s) create any easement "
+                    "rights or access restrictions.",
+                    f"[{fmb_fn}] undisclosed features: {', '.join(sorted(undisclosed))}",
+                ))
+
+    return checks
+
+
+# ═══════════════════════════════════════════════════
+# 10. CONSIDERATION CONSISTENCY — Sale Deed ↔ EC
+# ═══════════════════════════════════════════════════
+
+def check_consideration_consistency(extracted_data: dict) -> list[dict]:
+    """Match Sale Deed consideration with EC transaction by document number.
+
+    Finds the Sale Deed's document_number in EC transactions and compares
+    the consideration amounts with a 5% tolerance (to account for rounding
+    and extraction variations).
+    """
+    checks: list[dict] = []
+
+    # Collect Sale Deed info
+    sd_docs: list[tuple[str, str, float]] = []  # (filename, doc_number, amount)
+    ec_transactions: list[tuple[str, dict]] = []  # (filename, txn_dict)
+
+    for filename, doc in extracted_data.items():
+        if not isinstance(doc, dict):
+            continue
+        doc_type = doc.get("document_type", "")
+        d = doc.get("data", {})
+
+        if doc_type == "SALE_DEED":
+            doc_num = str(d.get("document_number", "")).strip()
+            financials = d.get("financials", {})
+            if isinstance(financials, dict):
+                amt = _parse_amount(financials.get("consideration_amount"))
+                if doc_num and amt and amt > 0:
+                    sd_docs.append((filename, doc_num, amt))
+
+        elif doc_type == "EC":
+            for txn in d.get("transactions", []):
+                if isinstance(txn, dict):
+                    ec_transactions.append((filename, txn))
+
+    if not sd_docs or not ec_transactions:
+        return checks
+
+    # For each Sale Deed, try to find matching EC transaction by doc number
+    for sd_fn, sd_doc_num, sd_amt in sd_docs:
+        # Normalize doc number: strip year suffix, leading zeros
+        sd_num_norm = re.sub(r'[/\-\s]', '', sd_doc_num.lower().strip())
+
+        matched = False
+        for ec_fn, txn in ec_transactions:
+            txn_doc_num = str(txn.get("document_number", "")).strip()
+            if not txn_doc_num:
+                continue
+            txn_num_norm = re.sub(r'[/\-\s]', '', txn_doc_num.lower().strip())
+
+            # Match: exact or partial (one contains the other)
+            if sd_num_norm == txn_num_norm or sd_num_norm in txn_num_norm or txn_num_norm in sd_num_norm:
+                matched = True
+                ec_amt = _parse_amount(txn.get("consideration_amount"))
+                if ec_amt and ec_amt > 0:
+                    # Compare with 5% tolerance
+                    diff = abs(sd_amt - ec_amt)
+                    tolerance = max(sd_amt, ec_amt) * 0.05
+                    if diff > tolerance:
+                        pct = (diff / max(sd_amt, ec_amt)) * 100
+                        checks.append(_make_check(
+                            "DET_CONSIDERATION_MISMATCH",
+                            "Sale Deed ↔ EC Consideration Mismatch",
+                            "HIGH", "FAIL",
+                            f"Sale Deed (Doc #{sd_doc_num}) shows consideration ₹{sd_amt:,.0f} "
+                            f"but the matching EC transaction (Doc #{txn_doc_num}) shows "
+                            f"₹{ec_amt:,.0f} — a {pct:.1f}% difference. "
+                            f"These should match as they record the same transaction.",
+                            "Verify both documents against the original registration record "
+                            "at the SRO. A mismatch may indicate extraction error or "
+                            "undervaluation in one record.",
+                            f"[{sd_fn} vs {ec_fn}] SD=₹{sd_amt:,.0f}, EC=₹{ec_amt:,.0f}, "
+                            f"diff={pct:.1f}%",
+                        ))
+                break  # Only need first match per Sale Deed
+
+        if not matched and sd_doc_num:
+            _trace(f"CONSIDERATION: SD doc #{sd_doc_num} not found in EC transactions")
+
+    return checks
+
+
+# ═══════════════════════════════════════════════════
+# 11. PAN CROSS-VERIFICATION
+# ═══════════════════════════════════════════════════
+
+_PAN_PATTERN = re.compile(r'^[A-Z]{5}[0-9]{4}[A-Z]$')
+
+
+def check_pan_consistency(extracted_data: dict) -> list[dict]:
+    """Verify PAN numbers across Sale Deed parties.
+
+    Checks:
+      1. PAN format validity (ABCDE1234F)
+      2. Duplicate PANs across different parties (same PAN on seller + buyer = red flag)
+      3. PAN availability — flags if parties lack PAN (advisory only)
+    """
+    checks: list[dict] = []
+
+    for filename, doc in extracted_data.items():
+        if not isinstance(doc, dict):
+            continue
+        doc_type = doc.get("document_type", "")
+        if doc_type != "SALE_DEED":
+            continue
+        d = doc.get("data", {})
+
+        # Collect all PANs with their party roles
+        pan_registry: dict[str, list[str]] = {}  # PAN → [list of "role: name"]
+        parties_without_pan: list[str] = []
+        invalid_pans: list[tuple[str, str]] = []  # (party_label, pan_value)
+
+        for role, party_list in [("Seller", d.get("seller", [])),
+                                  ("Buyer", d.get("buyer", []))]:
+            if not isinstance(party_list, list):
+                continue
+            for i, party in enumerate(party_list):
+                if not isinstance(party, dict):
+                    continue
+                name = party.get("name", f"Unknown {role} {i+1}")
+                pan = str(party.get("pan", "")).strip().upper()
+                party_label = f"{role}: {name}"
+
+                if not pan or pan in ("", "NONE", "N/A", "NA", "NOT AVAILABLE",
+                                       "NOT PROVIDED", "NIL"):
+                    parties_without_pan.append(party_label)
+                    continue
+
+                # Validate format
+                if not _PAN_PATTERN.match(pan):
+                    invalid_pans.append((party_label, pan))
+                else:
+                    pan_registry.setdefault(pan, []).append(party_label)
+
+        # Check 1: Invalid PAN formats
+        if invalid_pans:
+            for party_label, pan_val in invalid_pans:
+                checks.append(_make_check(
+                    "DET_PAN_FORMAT_INVALID",
+                    "Invalid PAN Format",
+                    "MEDIUM", "WARNING",
+                    f"PAN '{pan_val}' for {party_label} does not match the standard "
+                    f"Indian PAN format (ABCDE1234F — 5 letters, 4 digits, 1 letter). "
+                    f"This may indicate an extraction error or invalid PAN.",
+                    "Verify the PAN from the original Sale Deed document.",
+                    f"[{filename}] {party_label}: '{pan_val}'",
+                ))
+
+        # Check 2: Duplicate PANs across different parties
+        for pan, parties in pan_registry.items():
+            if len(parties) >= 2:
+                # Check if duplicate is across roles (seller+buyer = fraud risk)
+                roles = set(p.split(":")[0].strip() for p in parties)
+                if len(roles) >= 2:
+                    # Same PAN on both seller and buyer side — high risk
+                    checks.append(_make_check(
+                        "DET_PAN_DUPLICATE_CROSS",
+                        "Same PAN on Seller and Buyer",
+                        "HIGH", "FAIL",
+                        f"PAN {pan} appears on both sides of the transaction: "
+                        f"{', '.join(parties)}. This is a serious red flag — "
+                        f"the same person cannot be both seller and buyer.",
+                        "Investigate the transaction for possible fraud, benami "
+                        "transaction, or data extraction error.",
+                        f"[{filename}] PAN={pan}: {', '.join(parties)}",
+                    ))
+                else:
+                    # Same PAN on same side (two sellers with same PAN)
+                    checks.append(_make_check(
+                        "DET_PAN_DUPLICATE",
+                        "Duplicate PAN Within Same Party",
+                        "MEDIUM", "WARNING",
+                        f"PAN {pan} is shared by multiple parties on the same side: "
+                        f"{', '.join(parties)}. This may indicate a data entry error "
+                        f"or extraction issue.",
+                        "Verify each party's PAN from the original document.",
+                        f"[{filename}] PAN={pan}: {', '.join(parties)}",
+                    ))
+
+        # Check 3: Missing PANs (advisory) — only flag if some have PAN but others don't
+        if parties_without_pan and pan_registry:
+            checks.append(_make_check(
+                "DET_PAN_MISSING",
+                "Some Parties Lack PAN",
+                "LOW", "INFO",
+                f"{len(parties_without_pan)} party/parties have no PAN recorded: "
+                f"{', '.join(parties_without_pan[:5])}. "
+                f"PAN is mandatory for property transactions above ₹10 lakh.",
+                "Verify PAN details from the original Sale Deed or request "
+                "PAN cards from the parties for verification.",
+                f"[{filename}] {len(parties_without_pan)} missing, "
+                f"{len(pan_registry)} present",
+            ))
+
+    return checks
+
+
+# ═══════════════════════════════════════════════════
+# 12. PRE-EC PERIOD GAP CHECK
+# ═══════════════════════════════════════════════════
+
+def check_pre_ec_gap(extracted_data: dict) -> list[dict]:
+    """Flag when the Sale Deed references ownership history before EC start.
+
+    If the Sale Deed's previous_ownership document_date or earliest
+    ownership_history entry is significantly before the EC period_from,
+    the title chain before the EC start is unverified by the EC.
+    """
+    checks: list[dict] = []
+
+    # Collect EC period start
+    ec_starts: list[tuple[str, datetime]] = []
+    # Collect Sale Deed previous ownership dates
+    sd_prev_dates: list[tuple[str, datetime, str]] = []  # (fn, date, context)
+
+    for filename, doc in extracted_data.items():
+        if not isinstance(doc, dict):
+            continue
+        doc_type = doc.get("document_type", "")
+        d = doc.get("data", {})
+
+        if doc_type == "EC":
+            pf = _parse_date(d.get("period_from", ""))
+            if pf:
+                ec_starts.append((filename, pf))
+
+        elif doc_type == "SALE_DEED":
+            # Check previous_ownership.document_date
+            prev = d.get("previous_ownership", {})
+            if isinstance(prev, dict):
+                prev_date_str = prev.get("document_date", "")
+                prev_date = _parse_date(prev_date_str)
+                if prev_date:
+                    prev_owner = prev.get("previous_owner", "unknown")
+                    sd_prev_dates.append((
+                        filename, prev_date,
+                        f"previous_ownership doc #{prev.get('document_number', '?')} "
+                        f"dated {prev_date_str} (owner: {prev_owner})"
+                    ))
+
+            # Check ownership_history entries
+            history = d.get("ownership_history", [])
+            if isinstance(history, list):
+                for entry in history:
+                    if not isinstance(entry, dict):
+                        continue
+                    doc_date = _parse_date(entry.get("document_date", ""))
+                    if doc_date:
+                        sd_prev_dates.append((
+                            filename, doc_date,
+                            f"ownership_history: {entry.get('owner', '?')} acquired via "
+                            f"{entry.get('acquisition_mode', '?')} on {entry.get('document_date', '?')}"
+                        ))
+
+    if not ec_starts or not sd_prev_dates:
+        return checks
+
+    # Use the earliest EC start
+    earliest_ec_fn, earliest_ec_start = min(ec_starts, key=lambda x: x[1])
+
+    # Check if any previous ownership date falls before EC start
+    for sd_fn, prev_date, context in sd_prev_dates:
+        gap_days = (earliest_ec_start - prev_date).days
+        if gap_days > 365:  # More than 1 year before EC start
+            gap_years = gap_days / 365.25
+            checks.append(_make_check(
+                "DET_PRE_EC_GAP",
+                "Title History Before EC Period",
+                "MEDIUM", "WARNING",
+                f"Sale Deed references ownership history from {context}, "
+                f"which is {gap_years:.1f} years before the EC start date "
+                f"({earliest_ec_start.strftime('%d-%m-%Y')}). "
+                f"The title chain during this gap period is NOT verified by "
+                f"the EC and could conceal prior encumbrances or disputes.",
+                f"Obtain a supplementary EC from the SRO covering the period "
+                f"from {prev_date.strftime('%Y')} to "
+                f"{earliest_ec_start.strftime('%Y')} to close the gap.",
+                f"[{sd_fn}] prev_date={prev_date.strftime('%d-%m-%Y')}, "
+                f"ec_start={earliest_ec_start.strftime('%d-%m-%Y')}, "
+                f"gap={gap_years:.1f}yr",
+            ))
+
+    return checks
+
+
+# ═══════════════════════════════════════════════════
+# CHAIN OF TITLE BUILDER
+# ═══════════════════════════════════════════════════
+
+# Acquisition-mode label → canonical TRANSACTION_TYPES key
+_ACQUISITION_TO_TXN_TYPE = {
+    "sale": "SALE", "gift": "GIFT", "inheritance": "INHERITANCE",
+    "partition": "PARTITION", "settlement": "SETTLEMENT", "unknown": "OTHER",
+    "will": "WILL", "release": "RELEASE", "exchange": "EXCHANGE",
+    "relinquishment": "RELINQUISHMENT", "adoption": "ADOPTION",
+}
+
+
+def _join_party_names(parties: list | str) -> str:
+    """Join party names from a list-of-dicts, list-of-strings, or a raw string."""
+    if isinstance(parties, str):
+        return parties.strip()
+    if isinstance(parties, list):
+        names = []
+        for p in parties:
+            if isinstance(p, dict):
+                n = p.get("name", "")
+            else:
+                n = str(p)
+            n = n.strip()
+            if n:
+                names.append(n)
+        return ", ".join(names)
+    return ""
+
+
+def _chain_link(*, from_party: str, to_party: str, date: str = "",
+                transaction_type: str = "", document_number: str = "",
+                source: str = "", valid: bool = True, notes: str = "",
+                transaction_id: str = "") -> dict | None:
+    """Build a single chain-link dict.  Returns None if from/to is empty or 'Unknown'."""
+    f = (from_party or "").strip()
+    t = (to_party or "").strip()
+    if not f or not t:
+        return None
+    # Filter out placeholder names that produce meaningless chain links
+    if f.lower() in ("unknown", "not available", "n/a", "na", "-"):
+        return None
+    if t.lower() in ("unknown", "not available", "n/a", "na", "-"):
+        return None
+    return {
+        "sequence": 0,  # assigned later
+        "date": (date or "").strip(),
+        "from": f,
+        "to": t,
+        "transaction_type": (transaction_type or "OTHER").strip().upper(),
+        "document_number": (document_number or "").strip(),
+        "valid": valid,
+        "notes": (notes or "").strip(),
+        "source": source,
+        "transaction_id": (transaction_id or "").strip(),
+    }
+
+
+def _extract_ec_chain_links(data: dict, filename: str) -> list[dict]:
+    """Extract chain links from EC transactions."""
+    links: list[dict] = []
+    for txn in (data.get("transactions") or []):
+        txn_type = (txn.get("transaction_type") or "").strip().lower()
+        if txn_type not in CHAIN_RELEVANT_TYPES:
+            continue
+        doc_num = txn.get("document_number", "")
+        doc_year = txn.get("document_year", "")
+        doc_ref = f"{doc_num}/{doc_year}" if doc_num and doc_year else doc_num
+        link = _chain_link(
+            from_party=txn.get("seller_or_executant", ""),
+            to_party=txn.get("buyer_or_claimant", ""),
+            date=txn.get("date", ""),
+            transaction_type=txn_type.upper(),
+            document_number=doc_ref,
+            source="EC",
+            transaction_id=txn.get("transaction_id", ""),
+        )
+        if link:
+            links.append(link)
+    return links
+
+
+def _extract_sale_deed_chain_links(data: dict, filename: str) -> list[dict]:
+    """Extract chain links from Sale Deed — the sale itself + previous_ownership + ownership_history."""
+    links: list[dict] = []
+    sellers = _join_party_names(data.get("seller", []))
+    buyers = _join_party_names(data.get("buyer", []))
+
+    # The main sale transaction
+    link = _chain_link(
+        from_party=sellers,
+        to_party=buyers,
+        date=data.get("registration_date", data.get("execution_date", "")),
+        transaction_type="SALE",
+        document_number=data.get("document_number", ""),
+        source="Sale Deed",
+    )
+    if link:
+        links.append(link)
+
+    # previous_ownership (the acquisition that preceded this sale)
+    prev = data.get("previous_ownership") or {}
+    if prev.get("previous_owner"):
+        # The previous owner transferred to the first seller
+        first_seller = sellers.split(",")[0].strip() if sellers else ""
+        mode = _ACQUISITION_TO_TXN_TYPE.get(
+            (prev.get("acquisition_mode") or "Unknown").lower(), "OTHER"
+        )
+        link = _chain_link(
+            from_party=prev["previous_owner"],
+            to_party=first_seller,
+            date=prev.get("document_date", ""),
+            transaction_type=mode,
+            document_number=prev.get("document_number", ""),
+            source="Sale Deed",
+            notes="Previous ownership link",
+        )
+        if link:
+            links.append(link)
+
+    # ownership_history
+    for hist in (data.get("ownership_history") or []):
+        acquired_from = (hist.get("acquired_from") or "").strip()
+        owner = (hist.get("owner") or "").strip()
+        if not acquired_from or not owner:
+            continue
+        mode = _ACQUISITION_TO_TXN_TYPE.get(
+            (hist.get("acquisition_mode") or "Unknown").lower(), "OTHER"
+        )
+        link = _chain_link(
+            from_party=acquired_from,
+            to_party=owner,
+            date=hist.get("document_date", ""),
+            transaction_type=mode,
+            document_number=hist.get("document_number", ""),
+            source="Sale Deed",
+            notes="Ownership history",
+        )
+        if link:
+            links.append(link)
+
+    return links
+
+
+def _extract_a_register_chain_links(data: dict, filename: str) -> list[dict]:
+    """Extract chain links from A-Register mutation entries."""
+    links: list[dict] = []
+    for mut in (data.get("mutation_entries") or []):
+        from_owner = (mut.get("from_owner") or "").strip()
+        to_owner = (mut.get("to_owner") or "").strip()
+        if not to_owner:
+            continue
+        # If from_owner missing, use the register's primary owner
+        if not from_owner:
+            from_owner = (data.get("owner_name") or "").strip()
+        if not from_owner:
+            continue
+        reason = (mut.get("reason") or "OTHER").strip()
+        mode = _ACQUISITION_TO_TXN_TYPE.get(reason.lower(), reason.upper())
+        link = _chain_link(
+            from_party=from_owner,
+            to_party=to_owner,
+            date=mut.get("date", ""),
+            transaction_type=mode,
+            document_number=mut.get("order_number", ""),
+            source="A-Register",
+        )
+        if link:
+            links.append(link)
+    return links
+
+
+def _extract_gift_deed_chain_links(data: dict, filename: str) -> list[dict]:
+    """Extract chain link from Gift Deed — donor → donee."""
+    donor = data.get("donor") or {}
+    donee = data.get("donee") or {}
+    link = _chain_link(
+        from_party=donor.get("name", ""),
+        to_party=donee.get("name", ""),
+        date=data.get("registration_date", ""),
+        transaction_type="GIFT",
+        document_number=data.get("registration_number", ""),
+        source="Gift Deed",
+    )
+    return [link] if link else []
+
+
+def _extract_partition_deed_chain_links(data: dict, filename: str) -> list[dict]:
+    """Extract chain links from Partition Deed — joint owners → each partitioned share."""
+    links: list[dict] = []
+    joint_names = _join_party_names(data.get("joint_owners", []))
+    if not joint_names:
+        return links
+    for share in (data.get("partitioned_shares") or []):
+        to_name = (share.get("name") or "").strip()
+        if not to_name:
+            continue
+        link = _chain_link(
+            from_party=joint_names,
+            to_party=to_name,
+            date=data.get("registration_date", ""),
+            transaction_type="PARTITION",
+            document_number=data.get("registration_number", ""),
+            source="Partition Deed",
+        )
+        if link:
+            links.append(link)
+    return links
+
+
+def _extract_release_deed_chain_links(data: dict, filename: str) -> list[dict]:
+    """Extract chain link from Release Deed — releasing party → beneficiary."""
+    rel = data.get("releasing_party") or {}
+    ben = data.get("beneficiary") or {}
+    link = _chain_link(
+        from_party=rel.get("name", ""),
+        to_party=ben.get("name", ""),
+        date=data.get("registration_date", ""),
+        transaction_type="RELEASE",
+        document_number=data.get("registration_number", ""),
+        source="Release Deed",
+    )
+    return [link] if link else []
+
+
+def _extract_will_chain_links(data: dict, filename: str) -> list[dict]:
+    """Extract chain links from Will — testator → each beneficiary."""
+    links: list[dict] = []
+    testator = data.get("testator") or {}
+    from_name = (testator.get("name") or "").strip()
+    if not from_name:
+        return links
+    for b in (data.get("beneficiaries") or []):
+        to_name = (b.get("name") or "").strip()
+        if not to_name:
+            continue
+        share = b.get("share", "")
+        notes = f"Bequest: {share}" if share else ""
+        link = _chain_link(
+            from_party=from_name,
+            to_party=to_name,
+            date=data.get("execution_date", data.get("registration_date", "")),
+            transaction_type="WILL",
+            document_number=data.get("registration_number", ""),
+            source="Will",
+            notes=notes,
+        )
+        if link:
+            links.append(link)
+    return links
+
+
+def _extract_legal_heir_chain_links(data: dict, filename: str) -> list[dict]:
+    """Extract chain links from Legal Heir Certificate — deceased → each heir."""
+    links: list[dict] = []
+    from_name = (data.get("deceased_name") or "").strip()
+    if not from_name:
+        return links
+    for heir in (data.get("heirs") or []):
+        to_name = (heir.get("name") or "").strip()
+        if not to_name:
+            continue
+        share = heir.get("share_percentage", "")
+        rel = heir.get("relationship", "")
+        notes_parts = [p for p in [rel, f"{share}%" if share else ""] if p]
+        link = _chain_link(
+            from_party=from_name,
+            to_party=to_name,
+            date=data.get("date_of_death", data.get("certificate_date", "")),
+            transaction_type="INHERITANCE",
+            document_number=data.get("certificate_number", ""),
+            source="Legal Heir",
+            notes=", ".join(notes_parts),
+        )
+        if link:
+            links.append(link)
+    return links
+
+
+def _extract_court_order_chain_links(data: dict, filename: str) -> list[dict]:
+    """Extract chain link from Court Order — only for decree / attachment types."""
+    order_type = (data.get("order_type") or "").strip().lower()
+    if order_type not in ("decree", "attachment"):
+        return []
+    link = _chain_link(
+        from_party=data.get("petitioner", ""),
+        to_party=data.get("respondent", ""),
+        date=data.get("order_date", ""),
+        transaction_type="COURT_ORDER",
+        document_number=data.get("case_number", ""),
+        source="Court Order",
+        notes=f"Order type: {order_type}, status: {data.get('status', 'unknown')}",
+    )
+    return [link] if link else []
+
+
+def _extract_poa_chain_links(data: dict, filename: str) -> list[dict]:
+    """Extract chain link from Power of Attorney — principal → agent."""
+    principal = data.get("principal") or {}
+    agent = data.get("agent") or {}
+    link = _chain_link(
+        from_party=principal.get("name", "") if isinstance(principal, dict) else str(principal),
+        to_party=agent.get("name", "") if isinstance(agent, dict) else str(agent),
+        date=data.get("registration_date", ""),
+        transaction_type="POWER_OF_ATTORNEY",
+        document_number=data.get("registration_number", ""),
+        source="POA",
+        notes="Authorisation (not title transfer)",
+    )
+    return [link] if link else []
+
+
+# Per-document-type extractor dispatch
+_CHAIN_EXTRACTORS: dict[str, callable] = {
+    "EC": _extract_ec_chain_links,
+    "SALE_DEED": _extract_sale_deed_chain_links,
+    "A_REGISTER": _extract_a_register_chain_links,
+    "GIFT_DEED": _extract_gift_deed_chain_links,
+    "PARTITION_DEED": _extract_partition_deed_chain_links,
+    "RELEASE_DEED": _extract_release_deed_chain_links,
+    "WILL": _extract_will_chain_links,
+    "LEGAL_HEIR": _extract_legal_heir_chain_links,
+    "COURT_ORDER": _extract_court_order_chain_links,
+    "POA": _extract_poa_chain_links,
+}
+
+
+def _dedup_chain_key(link: dict) -> str:
+    """Generate a dedup key from document_number + type + to (to handle partitions)."""
+    doc = (link.get("document_number") or "").strip().lower()
+    txn = (link.get("transaction_type") or "").strip().lower()
+    t = (link.get("to") or "").strip().lower()
+    if doc:
+        return f"{doc}|{txn}|{t}"
+    f = (link.get("from") or "").strip().lower()
+    return f"{f}>{t}|{txn}"
+
+
+def _sort_key_for_link(link: dict) -> tuple:
+    """Sort key: (parsed_date or far-future, document_number)."""
+    d = _parse_date(link.get("date", ""))
+    if d is None:
+        # Try extracting a year from the document_number (e.g. "5909/2012")
+        doc = link.get("document_number", "")
+        m = re.search(r'/((?:19|20)\d{2})$', doc)
+        if m:
+            d = datetime(int(m.group(1)), 1, 1)
+    ts = d.timestamp() if d else 9999999999.0  # unknown dates go last
+    return (ts, link.get("document_number", ""))
+
+
+def build_chain_of_title(
+    extracted_data: dict,
+    *,
+    llm_chain: list[dict] | None = None,
+) -> list[dict]:
+    """Build a unified chain-of-title from all ownership-transfer documents.
+
+    Extracts chain links from EC transactions, Sale Deed ownership history,
+    A-Register mutations, Gift/Partition/Release Deeds, Wills, Legal Heir
+    Certificates, Court Orders, and POAs.  Deduplicates, merges with any
+    LLM-generated chain (preserving LLM notes/validity), sorts
+    chronologically, and assigns sequence numbers.
+
+    Args:
+        extracted_data: dict of {filename: {document_type, data}} from pipeline
+        llm_chain: optional chain_of_title list from Group 1 LLM verification
+
+    Returns:
+        List of chain-link dicts compatible with ``_CHAIN_LINK_SCHEMA``
+        (extended with ``source`` and ``transaction_id`` fields).
+    """
+    raw_links: list[dict] = []
+
+    # ── 1. Extract links from every document ──
+    for filename, entry in (extracted_data or {}).items():
+        doc_type = entry.get("document_type", "")
+        data = entry.get("data")
+        if not data or not isinstance(data, dict):
+            continue
+        extractor = _CHAIN_EXTRACTORS.get(doc_type)
+        if extractor:
+            try:
+                links = extractor(data, filename)
+                raw_links.extend(links)
+                if links:
+                    _trace(f"CHAIN_BUILDER [{doc_type}] [{filename}]: {len(links)} link(s)")
+            except Exception as e:
+                logger.warning(f"Chain builder: {doc_type} extractor failed for {filename}: {e}")
+
+    # ── 2. Deduplicate deterministic links ──
+    seen: dict[str, dict] = {}
+    for link in raw_links:
+        key = _dedup_chain_key(link)
+        if key in seen:
+            # Keep the one with more information (longer notes, has date, etc.)
+            existing = seen[key]
+            if (not existing.get("date") and link.get("date")):
+                seen[key] = link
+            elif len(link.get("notes", "")) > len(existing.get("notes", "")):
+                seen[key] = link
+        else:
+            seen[key] = link
+    deduped = list(seen.values())
+
+    # ── 3. Merge LLM chain links ──
+    if llm_chain:
+        # Build lookup of deterministic links by dedup key
+        det_keys = {_dedup_chain_key(l) for l in deduped}
+        for llm_link in llm_chain:
+            llm_key = _dedup_chain_key(llm_link)
+            if llm_key in det_keys:
+                # Find matching det link and merge LLM notes/valid
+                for dl in deduped:
+                    if _dedup_chain_key(dl) == llm_key:
+                        if llm_link.get("notes") and not dl.get("notes"):
+                            dl["notes"] = llm_link["notes"]
+                        if "valid" in llm_link:
+                            dl["valid"] = llm_link["valid"]
+                        break
+            else:
+                # LLM link has no deterministic match — keep it
+                deduped.append({
+                    "sequence": 0,
+                    "date": llm_link.get("date", ""),
+                    "from": llm_link.get("from", ""),
+                    "to": llm_link.get("to", ""),
+                    "transaction_type": llm_link.get("transaction_type", ""),
+                    "document_number": llm_link.get("document_number", ""),
+                    "valid": llm_link.get("valid", True),
+                    "notes": llm_link.get("notes", ""),
+                    "source": "LLM",
+                    "transaction_id": llm_link.get("transaction_id", ""),
+                })
+
+    # ── 4. Sort chronologically and assign sequence numbers ──
+    deduped.sort(key=_sort_key_for_link)
+    for i, link in enumerate(deduped, 1):
+        link["sequence"] = i
+
+    _trace(f"CHAIN_BUILDER total: {len(deduped)} link(s)")
+    return deduped
+
+
+# ═══════════════════════════════════════════════════
 # HELPER
 # ═══════════════════════════════════════════════════
 
@@ -2305,17 +3320,22 @@ def run_deterministic_checks(
         ("Temporal: EC period", check_ec_period_coverage),
         ("Temporal: Registration in EC", check_registration_within_ec),
         ("Temporal: Limitation period", check_limitation_period),
+        ("Temporal: Pre-EC gap", check_pre_ec_gap),
         ("Financial: Stamp duty", check_stamp_duty),
         ("Financial: Plausibility ranges", check_plausibility_ranges),
+        ("Financial: Consideration consistency", check_consideration_consistency),
         ("Property: Area consistency", check_area_consistency),
         ("Property: Survey numbers", check_survey_number_consistency),
         ("Property: Plot identity", check_plot_identity_consistency),
+        ("Property: Boundary adjacency", check_boundary_adjacency),
         ("Party: Name consistency", check_party_name_consistency),
         ("Party: Age fraud", check_age_fraud),
+        ("Party: PAN consistency", check_pan_consistency),
         ("Pattern: Rapid flipping", check_rapid_flipping),
         ("Pattern: Multiple sales", check_multiple_sales),
         ("Financial: Scale anomalies", check_financial_scale_anomalies),
         ("Geography: Multi-village", check_multi_village),
+        ("Geography: SRO jurisdiction", check_sro_jurisdiction),
         ("Validation: Field formats", check_field_format_validity),
         ("Validation: Garbled Tamil", check_garbled_tamil),
         ("Validation: Hallucination signs", check_hallucination_signs),

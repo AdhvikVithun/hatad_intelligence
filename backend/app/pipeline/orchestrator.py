@@ -34,14 +34,33 @@ from app.pipeline.extractors.patta import PattaExtractor
 from app.pipeline.extractors.sale_deed import SaleDeedExtractor
 from app.pipeline.extractors.generic import GenericExtractor
 from app.pipeline.extractors.base import TextPrimaryExtractor
+from app.pipeline.extractors.fmb import FMBExtractor
+from app.pipeline.extractors.adangal import AdangalExtractor
+from app.pipeline.extractors.layout_approval import LayoutApprovalExtractor
+from app.pipeline.extractors.legal_heir import LegalHeirExtractor
+from app.pipeline.extractors.poa import POAExtractor
+from app.pipeline.extractors.court_order import CourtOrderExtractor
+from app.pipeline.extractors.will_extractor import WillExtractor
+from app.pipeline.extractors.partition_deed import PartitionDeedExtractor
+from app.pipeline.extractors.gift_deed import GiftDeedExtractor
+from app.pipeline.extractors.release_deed import ReleaseDeedExtractor
+from app.pipeline.extractors.a_register import ARegisterExtractor
+from app.pipeline.extractors.chitta import ChittaExtractor
 from app.pipeline.schemas import (VERIFY_GROUP_SCHEMAS, EXTRACT_PATTA_SCHEMA,
-                                   EXTRACT_SALE_DEED_SCHEMA, EXTRACT_GENERIC_SCHEMA)
+                                   EXTRACT_SALE_DEED_SCHEMA, EXTRACT_GENERIC_SCHEMA,
+                                   EXTRACT_FMB_SCHEMA, EXTRACT_ADANGAL_SCHEMA,
+                                   EXTRACT_LAYOUT_SCHEMA, EXTRACT_LEGAL_HEIR_SCHEMA,
+                                   EXTRACT_POA_SCHEMA, EXTRACT_COURT_ORDER_SCHEMA,
+                                   EXTRACT_WILL_SCHEMA, EXTRACT_PARTITION_SCHEMA,
+                                   EXTRACT_GIFT_DEED_SCHEMA, EXTRACT_RELEASE_DEED_SCHEMA,
+                                   EXTRACT_A_REGISTER_SCHEMA, EXTRACT_CHITTA_SCHEMA)
 from app.pipeline.tools import (OLLAMA_TOOLS, set_rag_store, clear_rag_store, set_memory_bank,
                                 lookup_guideline_value, verify_sro_jurisdiction, check_document_age)
-from app.pipeline.deterministic import run_deterministic_checks
+from app.pipeline.deterministic import run_deterministic_checks, build_chain_of_title
 from app.pipeline.self_reflection import run_self_reflection, apply_amendments
 from app.pipeline.utils import split_survey_numbers, normalize_survey_number, normalize_raw_ocr_text, classify_ec_transactions_by_risk
 from app.pipeline.identity import IdentityResolver, _ROLE_LABELS as _ID_ROLE_LABELS
+from app.pipeline.check_registry import partition_checks, build_check_roster
 
 logger = logging.getLogger(__name__)
 
@@ -55,16 +74,56 @@ EXTRACTORS = {
         schema=EXTRACT_PATTA_SCHEMA,
     ),
     "CHITTA": TextPrimaryExtractor(
-        text_extractor=PattaExtractor(),
-        schema=EXTRACT_PATTA_SCHEMA,
+        text_extractor=ChittaExtractor(),
+        schema=EXTRACT_CHITTA_SCHEMA,
     ),
     "A_REGISTER": TextPrimaryExtractor(
-        text_extractor=PattaExtractor(),
-        schema=EXTRACT_PATTA_SCHEMA,
+        text_extractor=ARegisterExtractor(),
+        schema=EXTRACT_A_REGISTER_SCHEMA,
     ),
     "SALE_DEED": TextPrimaryExtractor(
         text_extractor=SaleDeedExtractor(),
         schema=EXTRACT_SALE_DEED_SCHEMA,
+    ),
+    "FMB": TextPrimaryExtractor(
+        text_extractor=FMBExtractor(),
+        schema=EXTRACT_FMB_SCHEMA,
+    ),
+    "ADANGAL": TextPrimaryExtractor(
+        text_extractor=AdangalExtractor(),
+        schema=EXTRACT_ADANGAL_SCHEMA,
+    ),
+    "LAYOUT_APPROVAL": TextPrimaryExtractor(
+        text_extractor=LayoutApprovalExtractor(),
+        schema=EXTRACT_LAYOUT_SCHEMA,
+    ),
+    "LEGAL_HEIR": TextPrimaryExtractor(
+        text_extractor=LegalHeirExtractor(),
+        schema=EXTRACT_LEGAL_HEIR_SCHEMA,
+    ),
+    "POA": TextPrimaryExtractor(
+        text_extractor=POAExtractor(),
+        schema=EXTRACT_POA_SCHEMA,
+    ),
+    "COURT_ORDER": TextPrimaryExtractor(
+        text_extractor=CourtOrderExtractor(),
+        schema=EXTRACT_COURT_ORDER_SCHEMA,
+    ),
+    "WILL": TextPrimaryExtractor(
+        text_extractor=WillExtractor(),
+        schema=EXTRACT_WILL_SCHEMA,
+    ),
+    "PARTITION_DEED": TextPrimaryExtractor(
+        text_extractor=PartitionDeedExtractor(),
+        schema=EXTRACT_PARTITION_SCHEMA,
+    ),
+    "GIFT_DEED": TextPrimaryExtractor(
+        text_extractor=GiftDeedExtractor(),
+        schema=EXTRACT_GIFT_DEED_SCHEMA,
+    ),
+    "RELEASE_DEED": TextPrimaryExtractor(
+        text_extractor=ReleaseDeedExtractor(),
+        schema=EXTRACT_RELEASE_DEED_SCHEMA,
     ),
 }
 DEFAULT_EXTRACTOR = TextPrimaryExtractor(     # Text-only for all other types
@@ -73,12 +132,15 @@ DEFAULT_EXTRACTOR = TextPrimaryExtractor(     # Text-only for all other types
 )
 
 # Verification group definitions — which doc types each group needs
+# anchor_types: at least 1 anchor must be present to trigger the group.
+# Supporting types (non-anchors in needs) enrich checks but never trigger alone.
 VERIFY_GROUPS = [
     {
         "id": 1,
         "name": "EC-Only Checks",
         "prompt_file": "verify_group1_ec.txt",
         "needs": ["EC"],
+        "anchor_types": ["EC"],
         "check_count": 5,
     },
     {
@@ -86,27 +148,36 @@ VERIFY_GROUPS = [
         "name": "Sale Deed Checks",
         "prompt_file": "verify_group2_saledeed.txt",
         "needs": ["SALE_DEED"],
+        "anchor_types": ["SALE_DEED"],
         "check_count": 4,
     },
     {
         "id": 3,
         "name": "Cross-Document Property Checks",
         "prompt_file": "verify_group3_crossdoc.txt",
-        "needs": ["EC", "PATTA", "CHITTA", "A_REGISTER", "SALE_DEED"],
+        "needs": ["EC", "PATTA", "CHITTA", "A_REGISTER", "SALE_DEED",
+                  "FMB", "ADANGAL", "LAYOUT_APPROVAL"],
+        "anchor_types": ["EC", "PATTA", "CHITTA", "A_REGISTER", "SALE_DEED"],
+        "min_anchor_types": 2,
         "check_count": 6,
     },
     {
         "id": 4,
         "name": "Cross-Document Compliance Checks",
         "prompt_file": "verify_group3b_compliance.txt",
-        "needs": ["EC", "PATTA", "CHITTA", "A_REGISTER", "SALE_DEED"],
+        "needs": ["EC", "PATTA", "CHITTA", "A_REGISTER", "SALE_DEED",
+                  "FMB", "ADANGAL", "LAYOUT_APPROVAL", "POA", "COURT_ORDER"],
+        "anchor_types": ["EC", "PATTA", "CHITTA", "A_REGISTER", "SALE_DEED"],
+        "min_anchor_types": 2,
         "check_count": 6,
     },
     {
         "id": 5,
         "name": "Chain & Pattern Analysis",
         "prompt_file": "verify_group4_chain.txt",
-        "needs": ["EC", "SALE_DEED"],
+        "needs": ["EC", "SALE_DEED", "LEGAL_HEIR", "WILL", "PARTITION_DEED",
+                  "GIFT_DEED", "RELEASE_DEED", "POA", "COURT_ORDER"],
+        "anchor_types": ["EC", "SALE_DEED"],
         "check_count": 10,
     },
 ]
@@ -745,6 +816,7 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
 
         all_checks = []
         group_results = {}  # group_id → raw result dict
+        group_na_stubs = {}  # group_id → list of pre-generated N/A check dicts
         group_score_deductions = 0
 
         # ── Prepare all group inputs upfront ──
@@ -788,46 +860,30 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                 # after asyncio.gather handles ALL group_results uniformly.
                 continue
 
-            # Group 3 (cross-document) requires ≥2 distinct doc types to be meaningful
-            if gid in (3, 4):  # Both cross-document groups need ≥2 doc types
-                relevant_types = {dtype for dtype in needed_types if docs_by_type.get(dtype)}
-                if len(relevant_types) < 2:
-                    yield _update(session, "verification",
-                                 f"Pass {gid}/{total_passes}: Skipped — only {next(iter(relevant_types))} available, "
-                                 f"cross-document checks need ≥2 doc types")
-                    na_checks = [{
-                        "rule_code": f"GROUP{gid}_SKIPPED",
-                        "rule_name": f"{gname} — Skipped (single doc type)",
-                        "severity": "INFO",
-                        "status": "INFO",
-                        "explanation": f"Only 1 document type ({next(iter(relevant_types))}) available. "
-                                       f"Cross-document consistency checks require at least 2 different "
-                                       f"document types to compare.",
-                        "recommendation": "Provide additional document types (EC, Patta, Sale Deed) for cross-checks.",
-                    }]
-                    group_results[gid] = {"group": f"group{gid}", "checks": na_checks}
-                    continue
+            # ── Anchor-type gate: supporting docs alone never trigger a group ──
+            anchor_types = group.get("anchor_types", needed_types)
+            relevant_types = {dtype for dtype in needed_types if docs_by_type.get(dtype)}
+            anchors_present = relevant_types & set(anchor_types)
+            min_anchors = group.get("min_anchor_types", 1)
 
-            # Group 5 (chain & pattern) requires SALE_DEED for transaction analysis
-            if gid == 5:
-                relevant_types = {dtype for dtype in needed_types if docs_by_type.get(dtype)}
-                if "SALE_DEED" not in relevant_types:
-                    avail = ", ".join(sorted(relevant_types)) or "none"
-                    yield _update(session, "verification",
-                                 f"Pass {gid}/{total_passes}: Skipped — no SALE_DEED, "
-                                 f"chain & pattern analysis requires sale transaction data")
-                    na_checks = [{
-                        "rule_code": "GROUP5_SKIPPED",
-                        "rule_name": f"{gname} — Skipped (no Sale Deed)",
-                        "severity": "INFO",
-                        "status": "INFO",
-                        "explanation": f"No Sale Deed document provided (available: {avail}). "
-                                       f"Chain of title and transaction pattern checks require "
-                                       f"sale transaction data to analyse.",
-                        "recommendation": "Provide a Sale Deed document for chain & pattern verification.",
-                    }]
-                    group_results[gid] = {"group": "group5", "checks": na_checks}
-                    continue
+            if len(anchors_present) < min_anchors:
+                avail = ", ".join(sorted(relevant_types)) or "none"
+                yield _update(session, "verification",
+                             f"Pass {gid}/{total_passes}: Skipped — "
+                             f"need ≥{min_anchors} anchor type(s) from "
+                             f"{{{', '.join(anchor_types)}}}, have {{{', '.join(sorted(anchors_present))}}}")
+                na_checks = [{
+                    "rule_code": f"GROUP{gid}_SKIPPED",
+                    "rule_name": f"{gname} — Skipped (insufficient anchor docs)",
+                    "severity": "INFO",
+                    "status": "INFO",
+                    "explanation": f"Available doc types: {avail}. "
+                                   f"This group requires ≥{min_anchors} of "
+                                   f"{', '.join(anchor_types)} to run meaningfully.",
+                    "recommendation": f"Provide {', '.join(anchor_types)} documents for this analysis.",
+                }]
+                group_results[gid] = {"group": f"group{gid}", "checks": na_checks}
+                continue
 
             doc_input = "\n\n".join(relevant_docs)
             doc_input_with_mb = f"{doc_input}\n\n{mb_context}"
@@ -853,6 +909,20 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                         break
 
             system_prompt = (PROMPTS_DIR / group["prompt_file"]).read_text(encoding="utf-8")
+
+            # ── Check-aware partitioning: split into runnable + N/A stubs ──
+            runnable_checks, na_stubs = partition_checks(gid, relevant_types)
+            if runnable_checks:
+                check_roster_block = build_check_roster(runnable_checks, relevant_types)
+                doc_input_with_mb += f"\n\n{check_roster_block}"
+                # Override check_count with actual runnable count so LLM
+                # isn't asked to produce stubs that are pre-generated
+                effective_check_count = len(runnable_checks)
+            else:
+                effective_check_count = group["check_count"]
+
+            # Stash na_stubs for post-LLM merge (keyed by group id)
+            group_na_stubs[gid] = na_stubs
 
             # Enable tools for ALL groups — knowledge base is always available,
             # RAG search is available when rag_store is active
@@ -931,7 +1001,7 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                 "Every evidence field must cite the specific document name and quoted text."
             )
 
-            group_inputs[gid] = (doc_input_with_mb, system_prompt, group_tools, rag_hint, rag_evidence_block)
+            group_inputs[gid] = (doc_input_with_mb, system_prompt, group_tools, rag_hint, rag_evidence_block, effective_check_count)
 
         # ── Run groups 1-5 in parallel (with concurrency limit) ──
         # Progress updates are written directly to session.progress (with
@@ -955,7 +1025,7 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
             if gid not in group_inputs:
                 return  # Already skipped above
 
-            doc_input_with_mb, system_prompt, group_tools, rag_hint, rag_evidence_block = group_inputs[gid]
+            doc_input_with_mb, system_prompt, group_tools, rag_hint, rag_evidence_block, effective_check_count = group_inputs[gid]
 
             # Per-group progress callback that writes live to the session
             async def _group_progress(stage: str, message: str, detail: dict):
@@ -991,7 +1061,7 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                     result = await call_llm(
                         prompt=(
                             f"Analyze these documents and perform the {gname} checks.\n"
-                            f"You MUST produce exactly {group['check_count']} checks for this group.\n"
+                            f"You MUST produce exactly {effective_check_count} checks for this group.\n"
                             f"Available document types: {doc_type_list}\n{rag_hint}\n\n"
                             f"<BEGIN_DOCUMENT_TEXT>\n{doc_input_with_mb}\n<END_DOCUMENT_TEXT>"
                             f"{rag_section}\n\n"
@@ -1043,6 +1113,12 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                     result, group, memory_bank,
                     filenames=[d["filename"] for d in session.documents],
                 )
+
+                # Merge pre-generated N/A stubs for checks whose doc requirements weren't met
+                na_stubs = group_na_stubs.get(gid, [])
+                if na_stubs:
+                    group_results[gid].setdefault("checks", []).extend(na_stubs)
+
                 checks = group_results[gid].get("checks", [])
                 thinking = result.pop("_thinking", "")
 
@@ -1336,7 +1412,16 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
         else:
             session.risk_band = "CRITICAL"
 
-        chain_of_title = group_results.get(1, {}).get("chain_of_title", [])
+        llm_chain = group_results.get(1, {}).get("chain_of_title", [])
+        try:
+            chain_of_title = build_chain_of_title(
+                session.extracted_data, llm_chain=llm_chain
+            )
+            logger.info(f"Chain of title: {len(chain_of_title)} links built "
+                        f"(LLM provided {len(llm_chain)})")
+        except Exception as e:
+            logger.error(f"Deterministic chain builder failed: {e}")
+            chain_of_title = llm_chain  # fallback to LLM chain
         active_encumbrances = group_results.get(1, {}).get("active_encumbrances", [])
 
         session.verification_result = {
@@ -1915,6 +2000,8 @@ _LLM_DET_EQUIVALENTS: dict[str, list[str]] = {
     "RAPID_FLIPPING": ["DET_RAPID_FLIPPING"],
     "MULTIPLE_SALES": ["DET_MULTIPLE_SALES"],
     "BROKEN_CHAIN_OF_TITLE": ["DET_CHAIN_BREAK", "DET_CHAIN_CONTINUITY"],
+    "BOUNDARY_CONSISTENCY": ["DET_BOUNDARY_MISMATCH", "DET_UNDISCLOSED_ENCUMBRANCE"],
+    "SRO_JURISDICTION": ["DET_SRO_JURISDICTION"],
 }
 
 
@@ -1967,11 +2054,16 @@ def _deduplicate_checks(checks: list[dict]) -> list[dict]:
     checks = deduped_list
 
     # ── Pass 2: LLM ↔ deterministic equivalents ──
-    # Index deterministic FAIL rule_codes
+    # Index deterministic FAIL and PASS rule_codes
     det_fail_codes: set[str] = set()
+    det_pass_codes: set[str] = set()
     for c in checks:
-        if c.get("source") == "deterministic" and c.get("status") == "FAIL":
-            det_fail_codes.add(c.get("rule_code", ""))
+        if c.get("source") == "deterministic":
+            rc = c.get("rule_code", "")
+            if c.get("status") == "FAIL":
+                det_fail_codes.add(rc)
+            elif c.get("status") == "PASS":
+                det_pass_codes.add(rc)
 
     deduped = 0
     for c in checks:
@@ -1979,11 +2071,17 @@ def _deduplicate_checks(checks: list[dict]) -> list[dict]:
             continue  # Only consider LLM checks for superseding
         rule = c.get("rule_code", "")
         if rule in _LLM_DET_EQUIVALENTS and c.get("status") == "FAIL":
-            # Check if any equivalent deterministic check also failed
             equiv_codes = _LLM_DET_EQUIVALENTS[rule]
+            # Case 1: deterministic also FAIL → supersede LLM (DET is more reliable)
             if any(ec in det_fail_codes for ec in equiv_codes):
                 c["status"] = "SUPERSEDED"
                 c["_superseded_by"] = [ec for ec in equiv_codes if ec in det_fail_codes]
+                deduped += 1
+            # Case 2: deterministic says PASS → LLM FAIL is a false positive
+            elif any(ec in det_pass_codes for ec in equiv_codes):
+                c["status"] = "SUPERSEDED"
+                c["_superseded_by"] = [ec for ec in equiv_codes if ec in det_pass_codes]
+                c["_override_reason"] = "Deterministic check confirmed PASS — LLM finding is a false positive"
                 deduped += 1
 
     if deduped:
@@ -2060,6 +2158,7 @@ _SEVERITY_DEDUCTIONS = {
     "CRITICAL": 25,
     "HIGH": 8,
     "MEDIUM": 3,
+    "LOW": 1,
     "INFO": 1,
 }
 
@@ -2689,6 +2788,8 @@ _RULE_TO_FACT_KEYS: dict[str, list[str]] = {
     "DET_MULTI_VILLAGE": ["village"],
     "DET_MULTI_TALUK": ["taluk"],
     "DET_MULTI_DISTRICT": ["district"],
+    # Deterministic engine — SRO jurisdiction
+    "DET_SRO_JURISDICTION": ["sro", "district", "village"],
     # Deterministic engine — multiple sales chain
     "DET_MULTIPLE_SALES": ["ownership_transfers", "ec_executant", "ec_claimant"],
 }

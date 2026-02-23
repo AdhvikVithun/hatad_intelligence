@@ -7,27 +7,31 @@ You have been given the CHECK RESULTS from 5 previous verification groups:
 - Group 4: Cross-document compliance checks (restricted land, ceiling, conversion, tax, encroachment)
 - Group 5: Chain of title & patterns (age fraud, broken chain, flipping, gaps)
 
-You also have a list of all documents provided.
+You also have a list of all documents provided and any N/A stubs for checks that could not be run due to missing documents.
 
-Perform these 2 final META checks:
+Perform the checks listed in the ═══ CHECKS TO PERFORM ═══ section of the document input below. The number of checks you must produce is specified in the task instruction.
 
-1. MISSING_DOCUMENTS (MEDIUM): Based on the documents provided and the findings from Groups 1-4, what ADDITIONAL documents should be obtained? Consider:
+For MISSING_DOCUMENTS: Based on the documents provided and the findings from all groups, what ADDITIONAL documents should be obtained? Consider:
    - If no Patta provided → flag it
-   - If no EC provided → flag it
+   - If no EC provided → flag it  
    - If no Sale Deed provided → flag it
    - If property is agricultural → need NA conversion order
-   - If in layout → need CMDA/DTCP approval
+   - If in layout → need CMDA/DTCP approval copy
    - If inherited → need Legal Heir Certificate / Probate
+   - If POA used → need original POA with verification
    - If multiple co-owners → need NOC from all
    - Tax paid receipts if not provided
    - Building approval if built-up property
+   - FMB sketch if boundary disputes found
+   - A-Register extract for mutation history verification
    List ALL missing/recommended documents.
 
-2. OVERALL_TITLE_OPINION (MEDIUM): Based on ALL check results from Groups 1-4, provide your overall legal opinion:
+For OVERALL_TITLE_OPINION: Based on ALL check results from all groups (including any N/A stubs), provide your overall legal opinion:
    - Is the title clear, marketable, and free from encumbrances?
    - Would you advise a client to proceed with purchase?
    - What are the top 3 risks?
    - What conditions should be met before purchase?
+   - Note any checks that were N/A due to missing documents — these represent unknown risk areas.
    Status: PASS = title appears clear, WARNING = proceed with caution, FAIL = do not proceed.
 
 ═══ MANDATORY EVIDENCE PROTOCOL ═══

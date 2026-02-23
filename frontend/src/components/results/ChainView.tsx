@@ -1,6 +1,20 @@
 import type { ChainLink } from '../../types';
 import './ChainView.css';
 
+const SOURCE_COLORS: Record<string, string> = {
+  'EC': '#3b82f6',
+  'Sale Deed': '#10b981',
+  'A-Register': '#f59e0b',
+  'Gift Deed': '#8b5cf6',
+  'Partition Deed': '#ec4899',
+  'Release Deed': '#06b6d4',
+  'Will': '#6366f1',
+  'Legal Heir': '#14b8a6',
+  'Court Order': '#ef4444',
+  'POA': '#a855f7',
+  'LLM': '#6b7280',
+};
+
 interface Props {
   chain: ChainLink[];
   chainGraphData: any;
@@ -10,6 +24,9 @@ export function ChainView({ chain, chainGraphData }: Props) {
   if (chain.length === 0) {
     return <div className="chain-view__empty">No chain of title data available</div>;
   }
+
+  // Collect unique sources present
+  const sources = [...new Set(chain.map(l => l.source).filter(Boolean))];
 
   return (
     <div className="chain-view">
@@ -24,6 +41,16 @@ export function ChainView({ chain, chainGraphData }: Props) {
             <span className="chain-legend__count">
               {chainGraphData.nodes.length} parties · {chainGraphData.links.length} transfers
             </span>
+            {sources.length > 0 && (
+              <>
+                <span className="chain-legend__sep" />
+                {sources.map(s => (
+                  <span key={s} className="chain-source-badge" style={{ background: SOURCE_COLORS[s!] ?? '#6b7280' }}>
+                    {s}
+                  </span>
+                ))}
+              </>
+            )}
           </div>
 
           {/* Horizontal Node Diagram */}
@@ -79,7 +106,7 @@ export function ChainView({ chain, chainGraphData }: Props) {
               <thead>
                 <tr>
                   <th>#</th><th>Date</th><th>From</th><th>To</th>
-                  <th>Type</th><th>Document</th><th>Status</th>
+                  <th>Type</th><th>Document</th><th>Source</th><th>Status</th>
                 </tr>
               </thead>
               <tbody>
@@ -91,6 +118,14 @@ export function ChainView({ chain, chainGraphData }: Props) {
                     <td className="chain-cell--to">{link.to}</td>
                     <td>{link.transaction_type}</td>
                     <td className="chain-cell--doc">{link.document_number}</td>
+                    <td>
+                      {link.source && (
+                        <span className="chain-source-badge chain-source-badge--sm"
+                              style={{ background: SOURCE_COLORS[link.source] ?? '#6b7280' }}>
+                          {link.source}
+                        </span>
+                      )}
+                    </td>
                     <td>
                       {link.valid
                         ? <span className="chain-status--valid">Valid</span>

@@ -42,6 +42,7 @@ from app.pipeline.utils import (
     split_name_parts,
     parse_area_to_sqft,
     _fix_orphan_vowel_signs,
+    _replace_tamil_subdivision_letters,
 )
 
 
@@ -1786,3 +1787,79 @@ class TestInsertionDigitNoFuzzy:
         matched, mtype = survey_numbers_match("31101", "31102")
         assert matched is False
         assert mtype == "mismatch"
+
+
+# ═══════════════════════════════════════════════════
+# TAMIL SUBDIVISION LETTER NORMALIZATION
+# ═══════════════════════════════════════════════════
+
+class TestTamilSubdivisionLetters:
+    """Test _replace_tamil_subdivision_letters and its integration with survey normalization."""
+
+    def test_a_letter(self):
+        """Tamil ஏ → 'a'."""
+        assert _replace_tamil_subdivision_letters("318/1ஏ") == "318/1a"
+
+    def test_b_letter(self):
+        """Tamil பி → 'b'."""
+        assert _replace_tamil_subdivision_letters("311/2பி") == "311/2b"
+
+    def test_c_letter(self):
+        """Tamil சி → 'c'."""
+        assert _replace_tamil_subdivision_letters("543/1சி1") == "543/1c1"
+
+    def test_d_letter(self):
+        """Tamil டி → 'd'."""
+        assert _replace_tamil_subdivision_letters("45/3டி") == "45/3d"
+
+    def test_e_letter(self):
+        """Tamil ஈ → 'e'."""
+        assert _replace_tamil_subdivision_letters("100/5ஈ") == "100/5e"
+
+    def test_no_tamil_letters_unchanged(self):
+        """Pure ASCII input passes through unchanged."""
+        assert _replace_tamil_subdivision_letters("318/1A") == "318/1A"
+
+    def test_empty_string(self):
+        assert _replace_tamil_subdivision_letters("") == ""
+
+    def test_none_returns_none(self):
+        assert _replace_tamil_subdivision_letters(None) is None
+
+
+class TestTamilSubdivisionMatchIntegration:
+    """Integration tests: Tamil subdivision letters match their ASCII equivalents after normalization."""
+
+    def test_318_1_a_exact(self):
+        """318/1ஏ matches 318/1A → exact."""
+        matched, mtype = survey_numbers_match("318/1ஏ", "318/1A")
+        assert matched is True
+        assert mtype == "exact"
+
+    def test_543_1c1_exact(self):
+        """543/1சி1 matches 543/1C1 → exact."""
+        matched, mtype = survey_numbers_match("543/1சி1", "543/1C1")
+        assert matched is True
+        assert mtype == "exact"
+
+    def test_311_2b_exact(self):
+        """311/2பி matches 311/2B → exact."""
+        matched, mtype = survey_numbers_match("311/2பி", "311/2B")
+        assert matched is True
+        assert mtype == "exact"
+
+    def test_normalize_tamil_digits_and_letters(self):
+        """Mixed Tamil digits + Tamil letters normalize correctly."""
+        # ௩௧௮/௧ஏ = 318/1A after both digit and letter normalization
+        result = normalize_survey_number("௩௧௮/௧ஏ")
+        assert result == "318/1a"
+
+    def test_normalize_with_prefix(self):
+        """S.F.No. 318/1ஏ → 318/1a."""
+        result = normalize_survey_number("S.F.No. 318/1ஏ")
+        assert result == "318/1a"
+
+    def test_different_tamil_subdivisions_mismatch(self):
+        """543/1ஏ vs 543/1சி → different subdivisions → mismatch."""
+        matched, mtype = survey_numbers_match("543/1ஏ", "543/1சி")
+        assert matched is False

@@ -28,7 +28,14 @@ from app.pipeline.deterministic import (
     check_field_format_validity,
     check_garbled_tamil,
     check_hallucination_signs,
+    check_boundary_adjacency,
+    check_consideration_consistency,
+    check_pan_consistency,
+    check_pre_ec_gap,
+    check_sro_jurisdiction,
     run_deterministic_checks,
+    build_chain_of_title,
+    _chain_link,
 )
 
 
@@ -2148,3 +2155,1575 @@ class TestPattaMutationPending:
         checks = check_party_name_consistency(data)
         assert "DET_BUYER_PATTA_MISMATCH" not in _codes(checks)
 
+
+# ═══════════════════════════════════════════════════
+# BOUNDARY ADJACENCY — FMB ↔ Sale Deed
+# ═══════════════════════════════════════════════════
+
+def _fmb(survey_no: str = "317", village: str = "Somayampalayam",
+         taluk: str = "Coimbatore North",
+         north: str = "", south: str = "", east: str = "", west: str = "") -> dict:
+    """Build a minimal FMB extracted_data."""
+    return {
+        "fmb.pdf": {
+            "document_type": "FMB",
+            "data": {
+                "survey_number": survey_no,
+                "village": village,
+                "taluk": taluk,
+                "boundaries": {
+                    "north": north,
+                    "south": south,
+                    "east": east,
+                    "west": west,
+                },
+                "remarks": "",
+            },
+        }
+    }
+
+
+def _sd_with_boundaries(north: str = "", south: str = "",
+                        east: str = "", west: str = "") -> dict:
+    """Build a Sale Deed with boundaries."""
+    return {
+        "sale_deed.pdf": {
+            "document_type": "SALE_DEED",
+            "data": {
+                "registration_date": "20-06-2020",
+                "seller": [{"name": "Seller A"}],
+                "buyer": [{"name": "Buyer B"}],
+                "property": {
+                    "survey_number": "317",
+                    "extent": "2400 sq.ft",
+                    "village": "Somayampalayam",
+                    "taluk": "Coimbatore North",
+                    "district": "Coimbatore",
+                    "boundaries": {
+                        "north": north,
+                        "south": south,
+                        "east": east,
+                        "west": west,
+                    },
+                },
+                "financials": {
+                    "consideration_amount": "45,00,000",
+                    "guideline_value": "40,00,000",
+                    "stamp_duty": "3,15,000",
+                },
+            },
+        }
+    }
+
+
+class TestBoundaryAdjacency:
+
+    def test_no_fmb_no_checks(self):
+        """No FMB in session → no boundary checks."""
+        data = _sd_with_boundaries(north="S.No. 316", south="Road", east="S.No. 318", west="Canal")
+        checks = check_boundary_adjacency(data)
+        assert checks == []
+
+    def test_no_sale_deed_no_checks(self):
+        """No Sale Deed in session → no boundary checks."""
+        data = _fmb(north="S.No. 316", south="Road", east="S.No. 318", west="Canal")
+        checks = check_boundary_adjacency(data)
+        assert checks == []
+
+    def test_matching_boundaries_no_issues(self):
+        """FMB and Sale Deed both mention same physical features → no checks."""
+        data = {
+            **_sd_with_boundaries(north="S.No. 316", south="Road", east="S.No. 318", west="Canal"),
+            **_fmb(north="S.No. 316", south="Road", east="S.No. 318", west="Canal"),
+        }
+        checks = check_boundary_adjacency(data)
+        assert "DET_BOUNDARY_MISMATCH" not in _codes(checks)
+        assert "DET_UNDISCLOSED_ENCUMBRANCE" not in _codes(checks)
+
+    def test_fmb_water_channel_not_in_sd(self):
+        """FMB shows water channel on east, Sale Deed says owner name → flag."""
+        data = {
+            **_sd_with_boundaries(north="S.No. 316", south="Road", east="Raman land", west="S.No. 320"),
+            **_fmb(north="S.No. 316", south="Road", east="Water channel", west="S.No. 320"),
+        }
+        checks = check_boundary_adjacency(data)
+        assert "DET_BOUNDARY_MISMATCH" in _codes(checks) or "DET_UNDISCLOSED_ENCUMBRANCE" in _codes(checks)
+        # Should flag the undisclosed water channel
+        assert "DET_UNDISCLOSED_ENCUMBRANCE" in _codes(checks)
+        c = _find(checks, "DET_UNDISCLOSED_ENCUMBRANCE")
+        assert c["severity"] == "MEDIUM"
+        assert c["status"] == "WARNING"
+        assert "water channel" in c["evidence"].lower() or "water channel" in c["explanation"].lower()
+
+    def test_fmb_road_disclosed_in_sd(self):
+        """Both mention road on south → no undisclosed encumbrance."""
+        data = {
+            **_sd_with_boundaries(north="S.No. 316", south="Main Road", east="S.No. 318", west="S.No. 320"),
+            **_fmb(north="S.No. 316", south="Road", east="S.No. 318", west="S.No. 320"),
+        }
+        checks = check_boundary_adjacency(data)
+        assert "DET_UNDISCLOSED_ENCUMBRANCE" not in _codes(checks)
+
+    def test_fmb_government_land(self):
+        """FMB shows Government land not in Sale Deed → undisclosed encumbrance."""
+        data = {
+            **_sd_with_boundaries(north="S.No. 316", south="S.No. 319", east="S.No. 318", west="S.No. 320"),
+            **_fmb(north="S.No. 316", south="Government land", east="S.No. 318", west="S.No. 320"),
+        }
+        checks = check_boundary_adjacency(data)
+        assert "DET_UNDISCLOSED_ENCUMBRANCE" in _codes(checks)
+
+    def test_boundary_mismatch_fmb_physical_sd_person(self):
+        """FMB north says 'Nala', Sale Deed says 'S.No. 316' → mismatch."""
+        data = {
+            **_sd_with_boundaries(north="S.No. 316", south="Road", east="S.No. 318", west="S.No. 320"),
+            **_fmb(north="Nala (drainage)", south="Road", east="S.No. 318", west="S.No. 320"),
+        }
+        checks = check_boundary_adjacency(data)
+        assert "DET_BOUNDARY_MISMATCH" in _codes(checks)
+        c = _find(checks, "DET_BOUNDARY_MISMATCH")
+        assert c["severity"] == "HIGH"
+        assert c["status"] == "WARNING"
+
+
+# ═══════════════════════════════════════════════════
+# CONSIDERATION CONSISTENCY — Sale Deed ↔ EC
+# ═══════════════════════════════════════════════════
+
+class TestConsiderationConsistency:
+
+    def test_no_ec_no_checks(self):
+        """Only Sale Deed → no checks."""
+        data = _sale_deed(consideration="45,00,000")
+        checks = check_consideration_consistency(data)
+        assert checks == []
+
+    def test_no_sale_deed_no_checks(self):
+        """Only EC → no checks."""
+        data = _ec("01-01-2010", "31-12-2025", transactions=[
+            {"row_number": 1, "date": "20-06-2020", "document_number": "5909/2012",
+             "transaction_type": "Sale", "consideration_amount": "45,00,000",
+             "seller_or_executant": "A", "buyer_or_claimant": "B"},
+        ])
+        checks = check_consideration_consistency(data)
+        assert checks == []
+
+    def test_matching_consideration_no_issues(self):
+        """SD and EC amounts match → no checks."""
+        sd = {
+            "sale_deed.pdf": {
+                "document_type": "SALE_DEED",
+                "data": {
+                    "document_number": "5909/2012",
+                    "registration_date": "20-06-2020",
+                    "seller": [{"name": "A"}],
+                    "buyer": [{"name": "B"}],
+                    "property": {"survey_number": "317", "extent": "2400 sq.ft",
+                                 "village": "X", "taluk": "Y", "district": "Z"},
+                    "financials": {"consideration_amount": "4500000",
+                                   "guideline_value": "4000000",
+                                   "stamp_duty": "315000"},
+                },
+            }
+        }
+        ec = _ec("01-01-2010", "31-12-2025", transactions=[
+            {"row_number": 1, "date": "20-06-2020", "document_number": "5909/2012",
+             "transaction_type": "Sale", "consideration_amount": "45,00,000",
+             "seller_or_executant": "A", "buyer_or_claimant": "B"},
+        ])
+        data = {**sd, **ec}
+        checks = check_consideration_consistency(data)
+        assert "DET_CONSIDERATION_MISMATCH" not in _codes(checks)
+
+    def test_mismatched_consideration(self):
+        """SD = 45L, EC = 30L → mismatch flagged."""
+        sd = {
+            "sale_deed.pdf": {
+                "document_type": "SALE_DEED",
+                "data": {
+                    "document_number": "5909/2012",
+                    "registration_date": "20-06-2020",
+                    "seller": [{"name": "A"}],
+                    "buyer": [{"name": "B"}],
+                    "property": {"survey_number": "317", "extent": "2400 sq.ft",
+                                 "village": "X", "taluk": "Y", "district": "Z"},
+                    "financials": {"consideration_amount": "4500000",
+                                   "guideline_value": "4000000",
+                                   "stamp_duty": "315000"},
+                },
+            }
+        }
+        ec = _ec("01-01-2010", "31-12-2025", transactions=[
+            {"row_number": 1, "date": "20-06-2020", "document_number": "5909/2012",
+             "transaction_type": "Sale", "consideration_amount": "30,00,000",
+             "seller_or_executant": "A", "buyer_or_claimant": "B"},
+        ])
+        data = {**sd, **ec}
+        checks = check_consideration_consistency(data)
+        assert "DET_CONSIDERATION_MISMATCH" in _codes(checks)
+        c = _find(checks, "DET_CONSIDERATION_MISMATCH")
+        assert c["severity"] == "HIGH"
+        assert c["status"] == "FAIL"
+
+    def test_within_tolerance_no_issue(self):
+        """SD = 45L, EC = 44.5L (< 5%) → no mismatch."""
+        sd = {
+            "sale_deed.pdf": {
+                "document_type": "SALE_DEED",
+                "data": {
+                    "document_number": "5909/2012",
+                    "registration_date": "20-06-2020",
+                    "seller": [{"name": "A"}],
+                    "buyer": [{"name": "B"}],
+                    "property": {"survey_number": "317", "extent": "2400 sq.ft",
+                                 "village": "X", "taluk": "Y", "district": "Z"},
+                    "financials": {"consideration_amount": "4500000",
+                                   "guideline_value": "4000000",
+                                   "stamp_duty": "315000"},
+                },
+            }
+        }
+        ec = _ec("01-01-2010", "31-12-2025", transactions=[
+            {"row_number": 1, "date": "20-06-2020", "document_number": "5909/2012",
+             "transaction_type": "Sale", "consideration_amount": "44,50,000",
+             "seller_or_executant": "A", "buyer_or_claimant": "B"},
+        ])
+        data = {**sd, **ec}
+        checks = check_consideration_consistency(data)
+        assert "DET_CONSIDERATION_MISMATCH" not in _codes(checks)
+
+    def test_doc_number_partial_match(self):
+        """SD doc# '5909' matches EC doc# '5909/2012' → comparison happens."""
+        sd = {
+            "sale_deed.pdf": {
+                "document_type": "SALE_DEED",
+                "data": {
+                    "document_number": "5909",
+                    "registration_date": "20-06-2020",
+                    "seller": [{"name": "A"}],
+                    "buyer": [{"name": "B"}],
+                    "property": {"survey_number": "317", "extent": "2400 sq.ft",
+                                 "village": "X", "taluk": "Y", "district": "Z"},
+                    "financials": {"consideration_amount": "4500000",
+                                   "guideline_value": "4000000",
+                                   "stamp_duty": "315000"},
+                },
+            }
+        }
+        ec = _ec("01-01-2010", "31-12-2025", transactions=[
+            {"row_number": 1, "date": "20-06-2020", "document_number": "5909/2012",
+             "transaction_type": "Sale", "consideration_amount": "30,00,000",
+             "seller_or_executant": "A", "buyer_or_claimant": "B"},
+        ])
+        data = {**sd, **ec}
+        checks = check_consideration_consistency(data)
+        assert "DET_CONSIDERATION_MISMATCH" in _codes(checks)
+
+
+# ═══════════════════════════════════════════════════
+# PAN CROSS-VERIFICATION
+# ═══════════════════════════════════════════════════
+
+class TestPanConsistency:
+
+    def test_no_sale_deed_no_checks(self):
+        """No Sale Deed → no PAN checks."""
+        data = _ec("01-01-2010", "31-12-2025")
+        checks = check_pan_consistency(data)
+        assert checks == []
+
+    def test_valid_pans_no_issues(self):
+        """All valid PANs, no duplicates → no checks."""
+        data = _sale_deed(
+            sellers=[{"name": "Seller A", "pan": "ABCDE1234F"}],
+            buyers=[{"name": "Buyer B", "pan": "FGHIJ5678K"}],
+        )
+        checks = check_pan_consistency(data)
+        assert "DET_PAN_FORMAT_INVALID" not in _codes(checks)
+        assert "DET_PAN_DUPLICATE" not in _codes(checks)
+        assert "DET_PAN_DUPLICATE_CROSS" not in _codes(checks)
+        assert "DET_PAN_MISSING" not in _codes(checks)
+
+    def test_invalid_pan_format(self):
+        """Invalid PAN format → DET_PAN_FORMAT_INVALID."""
+        data = _sale_deed(
+            sellers=[{"name": "Seller A", "pan": "12345ABCDE"}],
+            buyers=[{"name": "Buyer B", "pan": "FGHIJ5678K"}],
+        )
+        checks = check_pan_consistency(data)
+        assert "DET_PAN_FORMAT_INVALID" in _codes(checks)
+        c = _find(checks, "DET_PAN_FORMAT_INVALID")
+        assert c["severity"] == "MEDIUM"
+        assert c["status"] == "WARNING"
+
+    def test_duplicate_pan_cross_party(self):
+        """Same PAN on seller and buyer → DET_PAN_DUPLICATE_CROSS (FAIL)."""
+        data = _sale_deed(
+            sellers=[{"name": "Seller A", "pan": "ABCDE1234F"}],
+            buyers=[{"name": "Buyer B", "pan": "ABCDE1234F"}],
+        )
+        checks = check_pan_consistency(data)
+        assert "DET_PAN_DUPLICATE_CROSS" in _codes(checks)
+        c = _find(checks, "DET_PAN_DUPLICATE_CROSS")
+        assert c["severity"] == "HIGH"
+        assert c["status"] == "FAIL"
+
+    def test_duplicate_pan_same_side(self):
+        """Two sellers share same PAN → DET_PAN_DUPLICATE."""
+        data = _sale_deed(
+            sellers=[
+                {"name": "Seller A", "pan": "ABCDE1234F"},
+                {"name": "Seller B", "pan": "ABCDE1234F"},
+            ],
+            buyers=[{"name": "Buyer B", "pan": "FGHIJ5678K"}],
+        )
+        checks = check_pan_consistency(data)
+        assert "DET_PAN_DUPLICATE" in _codes(checks)
+        c = _find(checks, "DET_PAN_DUPLICATE")
+        assert c["severity"] == "MEDIUM"
+
+    def test_missing_pan_advisory(self):
+        """Some have PAN, some don't → DET_PAN_MISSING (INFO)."""
+        data = _sale_deed(
+            sellers=[{"name": "Seller A", "pan": "ABCDE1234F"}],
+            buyers=[{"name": "Buyer B"}],  # no PAN
+        )
+        checks = check_pan_consistency(data)
+        assert "DET_PAN_MISSING" in _codes(checks)
+        c = _find(checks, "DET_PAN_MISSING")
+        assert c["severity"] == "LOW"
+        assert c["status"] == "INFO"
+
+    def test_all_missing_no_flag(self):
+        """All parties missing PAN but none have PAN → no DET_PAN_MISSING."""
+        data = _sale_deed(
+            sellers=[{"name": "Seller A"}],
+            buyers=[{"name": "Buyer B"}],
+        )
+        checks = check_pan_consistency(data)
+        # No DET_PAN_MISSING because it only flags when SOME have PAN but others don't
+        assert "DET_PAN_MISSING" not in _codes(checks)
+
+    def test_pan_none_value_ignored(self):
+        """PAN set to 'N/A' treated as missing, not invalid format."""
+        data = _sale_deed(
+            sellers=[{"name": "Seller A", "pan": "ABCDE1234F"}],
+            buyers=[{"name": "Buyer B", "pan": "N/A"}],
+        )
+        checks = check_pan_consistency(data)
+        assert "DET_PAN_FORMAT_INVALID" not in _codes(checks)
+        assert "DET_PAN_MISSING" in _codes(checks)
+
+
+# ═══════════════════════════════════════════════════
+# PRE-EC PERIOD GAP CHECK
+# ═══════════════════════════════════════════════════
+
+class TestPreEcGap:
+
+    def test_no_gap_no_checks(self):
+        """Previous ownership within EC period → no gap."""
+        sd = {
+            "sale_deed.pdf": {
+                "document_type": "SALE_DEED",
+                "data": {
+                    "registration_date": "20-06-2020",
+                    "seller": [{"name": "A"}],
+                    "buyer": [{"name": "B"}],
+                    "property": {"survey_number": "317", "extent": "2400 sq.ft",
+                                 "village": "X", "taluk": "Y", "district": "Z"},
+                    "financials": {"consideration_amount": "4500000",
+                                   "guideline_value": "4000000",
+                                   "stamp_duty": "315000"},
+                    "previous_ownership": {
+                        "document_number": "1234/2012",
+                        "document_date": "15-03-2012",
+                        "previous_owner": "Old Owner",
+                        "acquisition_mode": "Sale",
+                    },
+                },
+            }
+        }
+        ec = _ec("01-01-2010", "31-12-2025")
+        data = {**sd, **ec}
+        checks = check_pre_ec_gap(data)
+        assert "DET_PRE_EC_GAP" not in _codes(checks)
+
+    def test_gap_detected(self):
+        """Previous ownership from 2000, EC starts 2010 → gap flagged."""
+        sd = {
+            "sale_deed.pdf": {
+                "document_type": "SALE_DEED",
+                "data": {
+                    "registration_date": "20-06-2020",
+                    "seller": [{"name": "A"}],
+                    "buyer": [{"name": "B"}],
+                    "property": {"survey_number": "317", "extent": "2400 sq.ft",
+                                 "village": "X", "taluk": "Y", "district": "Z"},
+                    "financials": {"consideration_amount": "4500000",
+                                   "guideline_value": "4000000",
+                                   "stamp_duty": "315000"},
+                    "previous_ownership": {
+                        "document_number": "789/2000",
+                        "document_date": "10-05-2000",
+                        "previous_owner": "Earlier Owner",
+                        "acquisition_mode": "Sale",
+                    },
+                },
+            }
+        }
+        ec = _ec("01-01-2010", "31-12-2025")
+        data = {**sd, **ec}
+        checks = check_pre_ec_gap(data)
+        assert "DET_PRE_EC_GAP" in _codes(checks)
+        c = _find(checks, "DET_PRE_EC_GAP")
+        assert c["severity"] == "MEDIUM"
+        assert c["status"] == "WARNING"
+        assert "2000" in c["explanation"]
+
+    def test_no_ec_no_checks(self):
+        """No EC → no gap check."""
+        sd = {
+            "sale_deed.pdf": {
+                "document_type": "SALE_DEED",
+                "data": {
+                    "registration_date": "20-06-2020",
+                    "seller": [{"name": "A"}],
+                    "buyer": [{"name": "B"}],
+                    "property": {"survey_number": "317", "extent": "2400 sq.ft",
+                                 "village": "X", "taluk": "Y", "district": "Z"},
+                    "financials": {"consideration_amount": "4500000",
+                                   "guideline_value": "4000000",
+                                   "stamp_duty": "315000"},
+                    "previous_ownership": {
+                        "document_number": "789/1990",
+                        "document_date": "10-05-1990",
+                        "previous_owner": "Earlier Owner",
+                        "acquisition_mode": "Sale",
+                    },
+                },
+            }
+        }
+        checks = check_pre_ec_gap(sd)
+        assert checks == []
+
+    def test_no_previous_ownership_no_checks(self):
+        """Sale Deed without previous_ownership → no gap check."""
+        data = {**_sale_deed(), **_ec("01-01-2010", "31-12-2025")}
+        checks = check_pre_ec_gap(data)
+        assert checks == []
+
+    def test_small_gap_under_1yr_no_flag(self):
+        """Previous ownership just 6 months before EC → no flag (< 1yr threshold)."""
+        sd = {
+            "sale_deed.pdf": {
+                "document_type": "SALE_DEED",
+                "data": {
+                    "registration_date": "20-06-2020",
+                    "seller": [{"name": "A"}],
+                    "buyer": [{"name": "B"}],
+                    "property": {"survey_number": "317", "extent": "2400 sq.ft",
+                                 "village": "X", "taluk": "Y", "district": "Z"},
+                    "financials": {"consideration_amount": "4500000",
+                                   "guideline_value": "4000000",
+                                   "stamp_duty": "315000"},
+                    "previous_ownership": {
+                        "document_number": "789/2009",
+                        "document_date": "01-07-2009",
+                        "previous_owner": "Earlier Owner",
+                        "acquisition_mode": "Sale",
+                    },
+                },
+            }
+        }
+        ec = _ec("01-01-2010", "31-12-2025")
+        data = {**sd, **ec}
+        checks = check_pre_ec_gap(data)
+        assert "DET_PRE_EC_GAP" not in _codes(checks)
+
+    def test_ownership_history_gap(self):
+        """Ownership history entry from 1995, EC starts 2010 → gap."""
+        sd = {
+            "sale_deed.pdf": {
+                "document_type": "SALE_DEED",
+                "data": {
+                    "registration_date": "20-06-2020",
+                    "seller": [{"name": "A"}],
+                    "buyer": [{"name": "B"}],
+                    "property": {"survey_number": "317", "extent": "2400 sq.ft",
+                                 "village": "X", "taluk": "Y", "district": "Z"},
+                    "financials": {"consideration_amount": "4500000",
+                                   "guideline_value": "4000000",
+                                   "stamp_duty": "315000"},
+                    "previous_ownership": {
+                        "document_number": "100/2012",
+                        "document_date": "20-01-2012",
+                        "previous_owner": "Recent Owner",
+                        "acquisition_mode": "Sale",
+                    },
+                    "ownership_history": [
+                        {
+                            "owner": "Ancestor",
+                            "acquisition_mode": "Inheritance",
+                            "document_date": "01-01-1995",
+                        },
+                    ],
+                },
+            }
+        }
+        ec = _ec("01-01-2010", "31-12-2025")
+        data = {**sd, **ec}
+        checks = check_pre_ec_gap(data)
+        assert "DET_PRE_EC_GAP" in _codes(checks)
+
+
+# ═══════════════════════════════════════════════════
+# build_chain_of_title
+# ═══════════════════════════════════════════════════
+
+class TestBuildChainOfTitle:
+    """Tests for the deterministic chain-of-title builder."""
+
+    # ── empty / minimal cases ──
+
+    def test_empty_extracted_data(self):
+        """No documents → empty chain."""
+        assert build_chain_of_title({}) == []
+
+    def test_none_extracted_data(self):
+        """None input → empty chain."""
+        assert build_chain_of_title(None) == []
+
+    def test_no_relevant_docs(self):
+        """Documents with no ownership data → empty chain."""
+        data = {
+            "fmb.pdf": {"document_type": "FMB", "data": {"survey_number": "317"}},
+            "patta.pdf": {"document_type": "PATTA", "data": {"owner_names": [{"name": "X"}]}},
+        }
+        assert build_chain_of_title(data) == []
+
+    # ── EC extraction ──
+
+    def test_ec_single_sale(self):
+        """Single EC SALE transaction → one chain link."""
+        data = {
+            "ec.pdf": {
+                "document_type": "EC",
+                "data": {
+                    "transactions": [{
+                        "row_number": 1,
+                        "date": "2012-12-13",
+                        "document_number": "5909",
+                        "document_year": "2012",
+                        "sro": "Vadavalli",
+                        "transaction_type": "SALE",
+                        "seller_or_executant": "Seller A",
+                        "buyer_or_claimant": "Buyer B",
+                        "extent": "1.14",
+                        "survey_number": "317",
+                        "consideration_amount": "5000000",
+                        "remarks": "",
+                        "suspicious_flags": [],
+                    }],
+                },
+            }
+        }
+        chain = build_chain_of_title(data)
+        assert len(chain) == 1
+        link = chain[0]
+        assert link["from"] == "Seller A"
+        assert link["to"] == "Buyer B"
+        assert link["transaction_type"] == "SALE"
+        assert link["document_number"] == "5909/2012"
+        assert link["source"] == "EC"
+        assert link["sequence"] == 1
+        assert link["valid"] is True
+
+    def test_ec_multiple_transactions_sorted(self):
+        """Multiple EC transactions → sorted chronologically."""
+        data = {
+            "ec.pdf": {
+                "document_type": "EC",
+                "data": {
+                    "transactions": [
+                        {
+                            "row_number": 1, "date": "2015-06-01",
+                            "document_number": "200", "document_year": "2015",
+                            "transaction_type": "SALE",
+                            "seller_or_executant": "B", "buyer_or_claimant": "C",
+                            "extent": "1", "survey_number": "1",
+                            "consideration_amount": "100", "remarks": "",
+                            "suspicious_flags": [],
+                        },
+                        {
+                            "row_number": 2, "date": "2010-01-15",
+                            "document_number": "100", "document_year": "2010",
+                            "transaction_type": "SALE",
+                            "seller_or_executant": "A", "buyer_or_claimant": "B",
+                            "extent": "1", "survey_number": "1",
+                            "consideration_amount": "50", "remarks": "",
+                            "suspicious_flags": [],
+                        },
+                    ],
+                },
+            }
+        }
+        chain = build_chain_of_title(data)
+        assert len(chain) == 2
+        assert chain[0]["from"] == "A"  # 2010 first
+        assert chain[0]["sequence"] == 1
+        assert chain[1]["from"] == "B"  # 2015 second
+        assert chain[1]["sequence"] == 2
+
+    def test_ec_excludes_mortgage(self):
+        """MORTGAGE transactions are not title transfers and should be excluded."""
+        data = {
+            "ec.pdf": {
+                "document_type": "EC",
+                "data": {
+                    "transactions": [
+                        {
+                            "row_number": 1, "date": "2012-01-01",
+                            "document_number": "100", "document_year": "2012",
+                            "transaction_type": "MORTGAGE",
+                            "seller_or_executant": "Owner", "buyer_or_claimant": "Bank",
+                            "extent": "1", "survey_number": "1",
+                            "consideration_amount": "500000", "remarks": "",
+                            "suspicious_flags": [],
+                        },
+                    ],
+                },
+            }
+        }
+        chain = build_chain_of_title(data)
+        assert len(chain) == 0
+
+    def test_ec_includes_gift_and_partition(self):
+        """GIFT and PARTITION EC types ARE included (title transfers)."""
+        data = {
+            "ec.pdf": {
+                "document_type": "EC",
+                "data": {
+                    "transactions": [
+                        {
+                            "row_number": 1, "date": "2010-01-01",
+                            "document_number": "50", "document_year": "2010",
+                            "transaction_type": "GIFT",
+                            "seller_or_executant": "Father", "buyer_or_claimant": "Son",
+                            "extent": "1", "survey_number": "1",
+                            "consideration_amount": "0", "remarks": "",
+                            "suspicious_flags": [],
+                        },
+                        {
+                            "row_number": 2, "date": "2011-01-01",
+                            "document_number": "60", "document_year": "2011",
+                            "transaction_type": "PARTITION",
+                            "seller_or_executant": "Brothers", "buyer_or_claimant": "Brother A",
+                            "extent": "0.5", "survey_number": "1",
+                            "consideration_amount": "0", "remarks": "",
+                            "suspicious_flags": [],
+                        },
+                    ],
+                },
+            }
+        }
+        chain = build_chain_of_title(data)
+        assert len(chain) == 2
+        types = [l["transaction_type"] for l in chain]
+        assert "GIFT" in types
+        assert "PARTITION" in types
+
+    def test_ec_includes_release(self):
+        """RELEASE is in CHAIN_RELEVANT_TYPES and should be included."""
+        data = {
+            "ec.pdf": {
+                "document_type": "EC",
+                "data": {
+                    "transactions": [{
+                        "row_number": 1, "date": "2012-01-01",
+                        "document_number": "70", "document_year": "2012",
+                        "transaction_type": "RELEASE",
+                        "seller_or_executant": "Co-owner", "buyer_or_claimant": "Main Owner",
+                        "extent": "1", "survey_number": "1",
+                        "consideration_amount": "0", "remarks": "",
+                        "suspicious_flags": [],
+                    }],
+                },
+            }
+        }
+        chain = build_chain_of_title(data)
+        assert len(chain) == 1
+        assert chain[0]["transaction_type"] == "RELEASE"
+
+    # ── Sale Deed extraction ──
+
+    def test_sale_deed_main_sale(self):
+        """Sale Deed produces chain link for the main sale."""
+        data = {
+            "sd.pdf": {
+                "document_type": "SALE_DEED",
+                "data": {
+                    "document_number": "5909",
+                    "registration_date": "2012-12-13",
+                    "seller": [{"name": "Seller X"}, {"name": "Seller Y"}],
+                    "buyer": [{"name": "Buyer Z"}],
+                },
+            }
+        }
+        chain = build_chain_of_title(data)
+        assert len(chain) >= 1
+        main = chain[0]
+        assert main["from"] == "Seller X, Seller Y"
+        assert main["to"] == "Buyer Z"
+        assert main["transaction_type"] == "SALE"
+        assert main["document_number"] == "5909"
+        assert main["source"] == "Sale Deed"
+
+    def test_sale_deed_previous_ownership(self):
+        """Sale Deed previous_ownership creates an earlier chain link."""
+        data = {
+            "sd.pdf": {
+                "document_type": "SALE_DEED",
+                "data": {
+                    "document_number": "200",
+                    "registration_date": "2015-06-01",
+                    "seller": [{"name": "Current Seller"}],
+                    "buyer": [{"name": "New Buyer"}],
+                    "previous_ownership": {
+                        "document_number": "100",
+                        "document_date": "2010-01-15",
+                        "previous_owner": "Old Owner",
+                        "acquisition_mode": "Sale",
+                    },
+                },
+            }
+        }
+        chain = build_chain_of_title(data)
+        assert len(chain) == 2
+        # Older link first (2010)
+        assert chain[0]["from"] == "Old Owner"
+        assert chain[0]["to"] == "Current Seller"
+        assert chain[0]["transaction_type"] == "SALE"
+        assert chain[0]["document_number"] == "100"
+        # Newer link (2015)
+        assert chain[1]["from"] == "Current Seller"
+        assert chain[1]["to"] == "New Buyer"
+
+    def test_sale_deed_ownership_history(self):
+        """Sale Deed ownership_history produces chain links."""
+        data = {
+            "sd.pdf": {
+                "document_type": "SALE_DEED",
+                "data": {
+                    "document_number": "300",
+                    "registration_date": "2020-01-01",
+                    "seller": [{"name": "S"}],
+                    "buyer": [{"name": "B"}],
+                    "ownership_history": [
+                        {
+                            "owner": "Middle Owner",
+                            "acquired_from": "First Owner",
+                            "acquisition_mode": "Gift",
+                            "document_number": "50",
+                            "document_date": "2005-01-01",
+                        },
+                        {
+                            "owner": "S",
+                            "acquired_from": "Middle Owner",
+                            "acquisition_mode": "Sale",
+                            "document_number": "150",
+                            "document_date": "2012-06-01",
+                        },
+                    ],
+                },
+            }
+        }
+        chain = build_chain_of_title(data)
+        assert len(chain) == 3  # 2 history + 1 main sale
+        assert chain[0]["from"] == "First Owner"
+        assert chain[0]["to"] == "Middle Owner"
+        assert chain[0]["transaction_type"] == "GIFT"
+        assert chain[1]["from"] == "Middle Owner"
+        assert chain[1]["to"] == "S"
+        assert chain[2]["from"] == "S"
+        assert chain[2]["to"] == "B"
+
+    # ── A-Register extraction ──
+
+    def test_a_register_mutations(self):
+        """A-Register mutation entries → chain links."""
+        data = {
+            "areg.pdf": {
+                "document_type": "A_REGISTER",
+                "data": {
+                    "owner_name": "Current Owner",
+                    "survey_numbers": [{"survey_no": "317", "extent": "1 acre"}],
+                    "village": "TestVillage",
+                    "taluk": "TestTaluk",
+                    "remarks": "",
+                    "mutation_entries": [
+                        {
+                            "date": "2010-05-01",
+                            "from_owner": "Prev Owner",
+                            "to_owner": "Current Owner",
+                            "reason": "Sale",
+                            "order_number": "MO-100",
+                        },
+                    ],
+                },
+            }
+        }
+        chain = build_chain_of_title(data)
+        assert len(chain) == 1
+        assert chain[0]["from"] == "Prev Owner"
+        assert chain[0]["to"] == "Current Owner"
+        assert chain[0]["source"] == "A-Register"
+        assert chain[0]["document_number"] == "MO-100"
+
+    def test_a_register_mutation_no_from_uses_owner(self):
+        """If mutation has no from_owner, fall back to register's owner_name."""
+        data = {
+            "areg.pdf": {
+                "document_type": "A_REGISTER",
+                "data": {
+                    "owner_name": "Registered Owner",
+                    "survey_numbers": [{"survey_no": "1", "extent": "1"}],
+                    "village": "V", "taluk": "T", "remarks": "",
+                    "mutation_entries": [
+                        {"to_owner": "New Owner", "reason": "Inheritance"},
+                    ],
+                },
+            }
+        }
+        chain = build_chain_of_title(data)
+        assert len(chain) == 1
+        assert chain[0]["from"] == "Registered Owner"
+
+    # ── Gift Deed extraction ──
+
+    def test_gift_deed(self):
+        """Gift Deed donor → donee chain link."""
+        data = {
+            "gift.pdf": {
+                "document_type": "GIFT_DEED",
+                "data": {
+                    "donor": {"name": "Father"},
+                    "donee": {"name": "Daughter"},
+                    "registration_number": "GD-100",
+                    "registration_date": "2018-03-15",
+                },
+            }
+        }
+        chain = build_chain_of_title(data)
+        assert len(chain) == 1
+        assert chain[0]["from"] == "Father"
+        assert chain[0]["to"] == "Daughter"
+        assert chain[0]["transaction_type"] == "GIFT"
+        assert chain[0]["source"] == "Gift Deed"
+
+    # ── Partition Deed extraction ──
+
+    def test_partition_deed(self):
+        """Partition Deed creates one link per partitioned share."""
+        data = {
+            "part.pdf": {
+                "document_type": "PARTITION_DEED",
+                "data": {
+                    "joint_owners": [{"name": "Brother A"}, {"name": "Brother B"}],
+                    "partitioned_shares": [
+                        {"name": "Brother A", "allocated_extent": "0.5 acre"},
+                        {"name": "Brother B", "allocated_extent": "0.5 acre"},
+                    ],
+                    "registration_number": "PD-50",
+                    "registration_date": "2016-01-01",
+                },
+            }
+        }
+        chain = build_chain_of_title(data)
+        assert len(chain) == 2
+        assert all(l["transaction_type"] == "PARTITION" for l in chain)
+        assert all(l["source"] == "Partition Deed" for l in chain)
+        tos = {l["to"] for l in chain}
+        assert tos == {"Brother A", "Brother B"}
+        assert chain[0]["from"] == "Brother A, Brother B"
+
+    # ── Release Deed extraction ──
+
+    def test_release_deed(self):
+        """Release Deed releasing_party → beneficiary chain link."""
+        data = {
+            "rel.pdf": {
+                "document_type": "RELEASE_DEED",
+                "data": {
+                    "releasing_party": {"name": "Co-owner"},
+                    "beneficiary": {"name": "Main Owner"},
+                    "registration_number": "RD-30",
+                    "registration_date": "2019-07-01",
+                },
+            }
+        }
+        chain = build_chain_of_title(data)
+        assert len(chain) == 1
+        assert chain[0]["from"] == "Co-owner"
+        assert chain[0]["to"] == "Main Owner"
+        assert chain[0]["transaction_type"] == "RELEASE"
+        assert chain[0]["source"] == "Release Deed"
+
+    # ── Will extraction ──
+
+    def test_will(self):
+        """Will testator → each beneficiary chain links."""
+        data = {
+            "will.pdf": {
+                "document_type": "WILL",
+                "data": {
+                    "testator": {"name": "Grandfather"},
+                    "beneficiaries": [
+                        {"name": "Son A", "share": "50%"},
+                        {"name": "Son B", "share": "50%"},
+                    ],
+                    "registration_number": "W-10",
+                    "execution_date": "2008-01-01",
+                },
+            }
+        }
+        chain = build_chain_of_title(data)
+        assert len(chain) == 2
+        assert all(l["from"] == "Grandfather" for l in chain)
+        assert all(l["transaction_type"] == "WILL" for l in chain)
+        assert all(l["source"] == "Will" for l in chain)
+        tos = {l["to"] for l in chain}
+        assert tos == {"Son A", "Son B"}
+        assert "Bequest: 50%" in chain[0]["notes"]
+
+    # ── Legal Heir extraction ──
+
+    def test_legal_heir(self):
+        """Legal Heir Certificate deceased → heirs chain links."""
+        data = {
+            "heir.pdf": {
+                "document_type": "LEGAL_HEIR",
+                "data": {
+                    "deceased_name": "Late Owner",
+                    "date_of_death": "2020-06-15",
+                    "certificate_number": "LH-5",
+                    "heirs": [
+                        {"name": "Wife", "relationship": "Spouse", "share_percentage": "50"},
+                        {"name": "Son", "relationship": "Son", "share_percentage": "50"},
+                    ],
+                },
+            }
+        }
+        chain = build_chain_of_title(data)
+        assert len(chain) == 2
+        assert all(l["from"] == "Late Owner" for l in chain)
+        assert all(l["transaction_type"] == "INHERITANCE" for l in chain)
+        assert all(l["source"] == "Legal Heir" for l in chain)
+
+    # ── Court Order extraction ──
+
+    def test_court_order_decree(self):
+        """Court Order with 'decree' type → chain link."""
+        data = {
+            "court.pdf": {
+                "document_type": "COURT_ORDER",
+                "data": {
+                    "petitioner": "Claimant X",
+                    "respondent": "Defendant Y",
+                    "order_type": "decree",
+                    "case_number": "CS-100/2018",
+                    "order_date": "2018-11-01",
+                    "status": "final",
+                },
+            }
+        }
+        chain = build_chain_of_title(data)
+        assert len(chain) == 1
+        assert chain[0]["from"] == "Claimant X"
+        assert chain[0]["to"] == "Defendant Y"
+        assert chain[0]["transaction_type"] == "COURT_ORDER"
+        assert chain[0]["source"] == "Court Order"
+
+    def test_court_order_injunction_excluded(self):
+        """Court Order with 'injunction' type → no chain link (not a transfer)."""
+        data = {
+            "court.pdf": {
+                "document_type": "COURT_ORDER",
+                "data": {
+                    "petitioner": "P",
+                    "respondent": "R",
+                    "order_type": "injunction",
+                    "case_number": "CS-200",
+                    "order_date": "2019-01-01",
+                },
+            }
+        }
+        chain = build_chain_of_title(data)
+        assert len(chain) == 0
+
+    # ── POA extraction ──
+
+    def test_poa(self):
+        """POA principal → agent chain link with notes."""
+        data = {
+            "poa.pdf": {
+                "document_type": "POA",
+                "data": {
+                    "principal": {"name": "Owner Abroad"},
+                    "agent": {"name": "Local Agent"},
+                    "registration_number": "POA-20",
+                    "registration_date": "2017-03-01",
+                },
+            }
+        }
+        chain = build_chain_of_title(data)
+        assert len(chain) == 1
+        assert chain[0]["from"] == "Owner Abroad"
+        assert chain[0]["to"] == "Local Agent"
+        assert chain[0]["transaction_type"] == "POWER_OF_ATTORNEY"
+        assert chain[0]["source"] == "POA"
+        assert "not title transfer" in chain[0]["notes"].lower()
+
+    # ── Deduplication ──
+
+    def test_dedup_same_sale_in_ec_and_sale_deed(self):
+        """Same sale appearing in both EC and Sale Deed → deduplicated to one link."""
+        data = {
+            "ec.pdf": {
+                "document_type": "EC",
+                "data": {
+                    "transactions": [{
+                        "row_number": 1, "date": "2012-12-13",
+                        "document_number": "5909", "document_year": "2012",
+                        "transaction_type": "SALE",
+                        "seller_or_executant": "Seller A",
+                        "buyer_or_claimant": "Buyer B",
+                        "extent": "1", "survey_number": "1",
+                        "consideration_amount": "5000000", "remarks": "",
+                        "suspicious_flags": [],
+                    }],
+                },
+            },
+            "sd.pdf": {
+                "document_type": "SALE_DEED",
+                "data": {
+                    "document_number": "5909/2012",
+                    "registration_date": "2012-12-13",
+                    "seller": [{"name": "Seller A"}],
+                    "buyer": [{"name": "Buyer B"}],
+                },
+            },
+        }
+        chain = build_chain_of_title(data)
+        # The EC doc_number becomes "5909/2012" and the SD doc_number is "5909/2012"
+        # so they share the same dedup key → only 1 link
+        sale_links = [l for l in chain if l["document_number"] == "5909/2012"]
+        assert len(sale_links) == 1
+
+    def test_dedup_keeps_richer_link(self):
+        """When deduplicating, keep the link with more information."""
+        data = {
+            "ec.pdf": {
+                "document_type": "EC",
+                "data": {
+                    "transactions": [{
+                        "row_number": 1, "date": "",
+                        "document_number": "100", "document_year": "2010",
+                        "transaction_type": "SALE",
+                        "seller_or_executant": "A", "buyer_or_claimant": "B",
+                        "extent": "1", "survey_number": "1",
+                        "consideration_amount": "0", "remarks": "",
+                        "suspicious_flags": [],
+                    }],
+                },
+            },
+            "sd.pdf": {
+                "document_type": "SALE_DEED",
+                "data": {
+                    "document_number": "100/2010",
+                    "registration_date": "2010-05-15",
+                    "seller": [{"name": "A"}],
+                    "buyer": [{"name": "B"}],
+                },
+            },
+        }
+        chain = build_chain_of_title(data)
+        # Both produce 100/2010 SALE → dedup. The one with the date should win.
+        matching = [l for l in chain if l["document_number"] == "100/2010"
+                    and l["transaction_type"] == "SALE"]
+        assert len(matching) == 1
+        assert matching[0]["date"] == "2010-05-15"
+
+    # ── LLM chain merge ──
+
+    def test_llm_chain_merge_notes(self):
+        """LLM chain notes are merged onto matching deterministic link."""
+        data = {
+            "ec.pdf": {
+                "document_type": "EC",
+                "data": {
+                    "transactions": [{
+                        "row_number": 1, "date": "2012-12-13",
+                        "document_number": "5909", "document_year": "2012",
+                        "transaction_type": "SALE",
+                        "seller_or_executant": "Seller A",
+                        "buyer_or_claimant": "Buyer B",
+                        "extent": "1", "survey_number": "1",
+                        "consideration_amount": "5000000", "remarks": "",
+                        "suspicious_flags": [],
+                    }],
+                },
+            },
+        }
+        llm_chain = [{
+            "sequence": 1,
+            "date": "2012-12-13",
+            "from": "Seller A",
+            "to": "Buyer B",
+            "transaction_type": "SALE",
+            "document_number": "5909/2012",
+            "valid": True,
+            "notes": "LLM note: consideration Rs 50L for 1.14 acres",
+        }]
+        chain = build_chain_of_title(data, llm_chain=llm_chain)
+        assert len(chain) == 1
+        assert "LLM note" in chain[0]["notes"]
+        assert chain[0]["source"] == "EC"  # deterministic source preserved
+
+    def test_llm_chain_validity_override(self):
+        """LLM chain valid=False overrides deterministic default True."""
+        data = {
+            "ec.pdf": {
+                "document_type": "EC",
+                "data": {
+                    "transactions": [{
+                        "row_number": 1, "date": "2012-12-13",
+                        "document_number": "5909", "document_year": "2012",
+                        "transaction_type": "SALE",
+                        "seller_or_executant": "Seller A",
+                        "buyer_or_claimant": "Buyer B",
+                        "extent": "1", "survey_number": "1",
+                        "consideration_amount": "5000000", "remarks": "",
+                        "suspicious_flags": [],
+                    }],
+                },
+            },
+        }
+        llm_chain = [{
+            "sequence": 1, "from": "Seller A", "to": "Buyer B",
+            "transaction_type": "SALE", "document_number": "5909/2012",
+            "valid": False, "notes": "Suspicious",
+        }]
+        chain = build_chain_of_title(data, llm_chain=llm_chain)
+        assert chain[0]["valid"] is False
+
+    def test_llm_only_chain_kept(self):
+        """LLM chain link with no deterministic match → kept with source='LLM'."""
+        data = {}
+        llm_chain = [{
+            "sequence": 1, "date": "2008-01-01",
+            "from": "Unknown Seller", "to": "Unknown Buyer",
+            "transaction_type": "SALE", "document_number": "OLD-100",
+            "valid": True, "notes": "From LLM analysis",
+        }]
+        chain = build_chain_of_title(data, llm_chain=llm_chain)
+        assert len(chain) == 1
+        assert chain[0]["source"] == "LLM"
+        assert chain[0]["from"] == "Unknown Seller"
+
+    # ── Mixed documents — unified chain ──
+
+    def test_mixed_ec_sale_deed_a_register(self):
+        """EC + Sale Deed + A-Register → unified chronological chain."""
+        data = {
+            "ec.pdf": {
+                "document_type": "EC",
+                "data": {
+                    "transactions": [{
+                        "row_number": 1, "date": "2015-06-01",
+                        "document_number": "200", "document_year": "2015",
+                        "transaction_type": "SALE",
+                        "seller_or_executant": "B", "buyer_or_claimant": "C",
+                        "extent": "1", "survey_number": "1",
+                        "consideration_amount": "100", "remarks": "",
+                        "suspicious_flags": [],
+                    }],
+                },
+            },
+            "sd.pdf": {
+                "document_type": "SALE_DEED",
+                "data": {
+                    "document_number": "200/2015",
+                    "registration_date": "2015-06-01",
+                    "seller": [{"name": "B"}],
+                    "buyer": [{"name": "C"}],
+                    "previous_ownership": {
+                        "document_number": "100",
+                        "document_date": "2010-01-01",
+                        "previous_owner": "A",
+                        "acquisition_mode": "Sale",
+                    },
+                },
+            },
+            "areg.pdf": {
+                "document_type": "A_REGISTER",
+                "data": {
+                    "owner_name": "C",
+                    "survey_numbers": [{"survey_no": "1", "extent": "1"}],
+                    "village": "V", "taluk": "T", "remarks": "",
+                    "mutation_entries": [{
+                        "date": "2020-03-01",
+                        "from_owner": "C",
+                        "to_owner": "D",
+                        "reason": "Inheritance",
+                        "order_number": "MO-50",
+                    }],
+                },
+            },
+        }
+        chain = build_chain_of_title(data)
+        # Should have: A→B (prev_ownership 2010), B→C (deduped 2015), C→D (mutation 2020)
+        assert len(chain) == 3
+        assert chain[0]["from"] == "A"
+        assert chain[0]["date"] == "2010-01-01"
+        assert chain[1]["to"] == "C"
+        assert chain[2]["from"] == "C"
+        assert chain[2]["to"] == "D"
+        assert chain[2]["source"] == "A-Register"
+        # Sequential numbering
+        assert [l["sequence"] for l in chain] == [1, 2, 3]
+
+    # ── Edge cases ──
+
+    def test_empty_party_names_skipped(self):
+        """Chain links with empty from or to are not created."""
+        data = {
+            "ec.pdf": {
+                "document_type": "EC",
+                "data": {
+                    "transactions": [{
+                        "row_number": 1, "date": "2012-01-01",
+                        "document_number": "100", "document_year": "2012",
+                        "transaction_type": "SALE",
+                        "seller_or_executant": "",
+                        "buyer_or_claimant": "Buyer",
+                        "extent": "1", "survey_number": "1",
+                        "consideration_amount": "0", "remarks": "",
+                        "suspicious_flags": [],
+                    }],
+                },
+            }
+        }
+        chain = build_chain_of_title(data)
+        assert len(chain) == 0
+
+    def test_missing_date_sorted_last(self):
+        """Links with no parseable date appear after dated links."""
+        data = {
+            "sd1.pdf": {
+                "document_type": "SALE_DEED",
+                "data": {
+                    "document_number": "1",
+                    "registration_date": "",
+                    "seller": [{"name": "X"}],
+                    "buyer": [{"name": "Y"}],
+                },
+            },
+            "sd2.pdf": {
+                "document_type": "SALE_DEED",
+                "data": {
+                    "document_number": "2",
+                    "registration_date": "2015-01-01",
+                    "seller": [{"name": "A"}],
+                    "buyer": [{"name": "B"}],
+                },
+            },
+        }
+        chain = build_chain_of_title(data)
+        assert len(chain) == 2
+        # The one with date should come first
+        assert chain[0]["date"] == "2015-01-01"
+        assert chain[1]["date"] == ""
+
+    def test_document_with_no_data_dict_skipped(self):
+        """Document entry with data=None is gracefully skipped."""
+        data = {
+            "bad.pdf": {"document_type": "EC", "data": None},
+        }
+        chain = build_chain_of_title(data)
+        assert chain == []
+
+    def test_transaction_id_preserved(self):
+        """EC transaction_id is preserved in the chain link."""
+        data = {
+            "ec.pdf": {
+                "document_type": "EC",
+                "data": {
+                    "transactions": [{
+                        "row_number": 1, "date": "2012-12-13",
+                        "document_number": "5909", "document_year": "2012",
+                        "transaction_type": "SALE",
+                        "seller_or_executant": "A", "buyer_or_claimant": "B",
+                        "extent": "1", "survey_number": "1",
+                        "consideration_amount": "5000000", "remarks": "",
+                        "suspicious_flags": [],
+                        "transaction_id": "EC-5909/2012-Vadavalli",
+                    }],
+                },
+            }
+        }
+        chain = build_chain_of_title(data)
+        assert chain[0]["transaction_id"] == "EC-5909/2012-Vadavalli"
+
+    def test_all_sources_in_one_chain(self):
+        """Verify all document types can contribute to one unified chain."""
+        data = {
+            "ec.pdf": {
+                "document_type": "EC",
+                "data": {
+                    "transactions": [{
+                        "row_number": 1, "date": "2000-01-01",
+                        "document_number": "1", "document_year": "2000",
+                        "transaction_type": "SALE",
+                        "seller_or_executant": "A", "buyer_or_claimant": "B",
+                        "extent": "1", "survey_number": "1",
+                        "consideration_amount": "100", "remarks": "",
+                        "suspicious_flags": [],
+                    }],
+                },
+            },
+            "sd.pdf": {
+                "document_type": "SALE_DEED",
+                "data": {
+                    "document_number": "2",
+                    "registration_date": "2005-01-01",
+                    "seller": [{"name": "B"}],
+                    "buyer": [{"name": "C"}],
+                },
+            },
+            "gift.pdf": {
+                "document_type": "GIFT_DEED",
+                "data": {
+                    "donor": {"name": "C"},
+                    "donee": {"name": "D"},
+                    "registration_number": "3",
+                    "registration_date": "2010-01-01",
+                },
+            },
+            "areg.pdf": {
+                "document_type": "A_REGISTER",
+                "data": {
+                    "owner_name": "D",
+                    "survey_numbers": [{"survey_no": "1", "extent": "1"}],
+                    "village": "V", "taluk": "T", "remarks": "",
+                    "mutation_entries": [{
+                        "date": "2015-01-01",
+                        "from_owner": "D", "to_owner": "E",
+                        "reason": "Inheritance", "order_number": "MO-1",
+                    }],
+                },
+            },
+            "will.pdf": {
+                "document_type": "WILL",
+                "data": {
+                    "testator": {"name": "E"},
+                    "beneficiaries": [{"name": "F", "share": "100%"}],
+                    "registration_number": "4",
+                    "execution_date": "2018-01-01",
+                },
+            },
+            "heir.pdf": {
+                "document_type": "LEGAL_HEIR",
+                "data": {
+                    "deceased_name": "F",
+                    "date_of_death": "2020-01-01",
+                    "certificate_number": "5",
+                    "heirs": [{"name": "G", "relationship": "Son", "share_percentage": "100"}],
+                },
+            },
+        }
+        chain = build_chain_of_title(data)
+        sources = {l["source"] for l in chain}
+        assert "EC" in sources
+        assert "Sale Deed" in sources
+        assert "Gift Deed" in sources
+        assert "A-Register" in sources
+        assert "Will" in sources
+        assert "Legal Heir" in sources
+        # Verify chronological ordering
+        assert chain[0]["date"] == "2000-01-01"
+        assert chain[-1]["date"] == "2020-01-01"
+        # Verify all sequences are sequential
+        seqs = [l["sequence"] for l in chain]
+        assert seqs == list(range(1, len(chain) + 1))
+
+
+# ═══════════════════════════════════════════════════
+# SRO JURISDICTION DETERMINISTIC CHECK
+# ═══════════════════════════════════════════════════
+
+class TestCheckSroJurisdiction:
+    """Tests for check_sro_jurisdiction — deterministic SRO override."""
+
+    def test_vadavalli_coimbatore_pass(self):
+        """Vadavalli SRO + Coimbatore district → PASS."""
+        data = {
+            "sale_deed.pdf": {
+                "document_type": "SALE_DEED",
+                "data": {
+                    "sro": "Vadavalli",
+                    "property": {
+                        "district": "Coimbatore",
+                        "village": "Somayampalayam",
+                    },
+                },
+            },
+        }
+        checks = check_sro_jurisdiction(data)
+        assert len(checks) == 1
+        assert checks[0]["rule_code"] == "DET_SRO_JURISDICTION"
+        assert checks[0]["status"] == "PASS"
+        assert checks[0]["severity"] == "CRITICAL"
+
+    def test_singanallur_coimbatore_pass(self):
+        """Singanallur SRO + Coimbatore district → PASS."""
+        data = {
+            "sale_deed.pdf": {
+                "document_type": "SALE_DEED",
+                "data": {
+                    "sro": "Singanallur",
+                    "property": {
+                        "district": "Coimbatore",
+                        "village": "Ganapathy",
+                    },
+                },
+            },
+        }
+        checks = check_sro_jurisdiction(data)
+        assert len(checks) == 1
+        assert checks[0]["status"] == "PASS"
+
+    def test_sro_from_document_number(self):
+        """SRO extracted from document_number when sro field is empty."""
+        data = {
+            "sale_deed.pdf": {
+                "document_type": "SALE_DEED",
+                "data": {
+                    "document_number": "R/Vadavalli/Book1/5909/2012",
+                    "property": {
+                        "district": "Coimbatore",
+                        "village": "Somayampalayam",
+                    },
+                },
+            },
+        }
+        checks = check_sro_jurisdiction(data)
+        assert len(checks) == 1
+        assert checks[0]["status"] == "PASS"
+
+    def test_known_mismatch_fail(self):
+        """Vadavalli SRO + Madurai district → FAIL (known mapping mismatch)."""
+        data = {
+            "sale_deed.pdf": {
+                "document_type": "SALE_DEED",
+                "data": {
+                    "sro": "Vadavalli",
+                    "property": {
+                        "district": "Madurai",
+                        "village": "SomeVillage",
+                    },
+                },
+            },
+        }
+        checks = check_sro_jurisdiction(data)
+        assert len(checks) == 1
+        assert checks[0]["status"] == "FAIL"
+
+    def test_missing_sro_no_checks(self):
+        """No SRO available → no checks emitted."""
+        data = {
+            "sale_deed.pdf": {
+                "document_type": "SALE_DEED",
+                "data": {
+                    "property": {
+                        "district": "Coimbatore",
+                        "village": "Somayampalayam",
+                    },
+                },
+            },
+        }
+        checks = check_sro_jurisdiction(data)
+        assert len(checks) == 0
+
+    def test_ec_sro_used_when_sale_deed_missing(self):
+        """EC document provides SRO when Sale Deed lacks it."""
+        data = {
+            "ec.pdf": {
+                "document_type": "EC",
+                "data": {
+                    "sro": "Vadavalli",
+                    "district": "Coimbatore",
+                    "village": "Somayampalayam",
+                },
+            },
+        }
+        checks = check_sro_jurisdiction(data)
+        assert len(checks) == 1
+        assert checks[0]["status"] == "PASS"
+
+
+# ═══════════════════════════════════════════════════
+# CHAIN LINK UNKNOWN FILTERING
+# ═══════════════════════════════════════════════════
+
+class TestChainLinkUnknownFiltering:
+    """Tests for _chain_link filtering of Unknown/placeholder party names."""
+
+    def test_unknown_from_party(self):
+        """from_party='Unknown' → None."""
+        result = _chain_link(from_party="Unknown", to_party="V. அருள்சிங்")
+        assert result is None
+
+    def test_unknown_to_party(self):
+        """to_party='Unknown' → None."""
+        result = _chain_link(from_party="முருகன்", to_party="Unknown")
+        assert result is None
+
+    def test_both_unknown(self):
+        """Both parties Unknown → None."""
+        result = _chain_link(from_party="unknown", to_party="unknown")
+        assert result is None
+
+    def test_not_available_filtered(self):
+        """'Not Available' → None."""
+        result = _chain_link(from_party="Not Available", to_party="Someone")
+        assert result is None
+
+    def test_na_filtered(self):
+        """'N/A' → None."""
+        result = _chain_link(from_party="Someone", to_party="N/A")
+        assert result is None
+
+    def test_dash_filtered(self):
+        """'-' → None."""
+        result = _chain_link(from_party="-", to_party="Someone")
+        assert result is None
+
+    def test_real_names_pass(self):
+        """Real Tamil names produce a valid chain link."""
+        result = _chain_link(
+            from_party="மருதகுட்டி",
+            to_party="V. அருள்சிங்",
+            date="1992-01-20",
+            transaction_type="SALE",
+            source="Sale Deed",
+        )
+        assert result is not None
+        assert result["from"] == "மருதகுட்டி"
+        assert result["to"] == "V. அருள்சிங்"
+        assert result["transaction_type"] == "SALE"
+
+    def test_empty_string_filtered(self):
+        """Empty string → None (existing behavior preserved)."""
+        result = _chain_link(from_party="", to_party="Someone")
+        assert result is None

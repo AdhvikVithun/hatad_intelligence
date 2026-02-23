@@ -90,6 +90,7 @@ export interface ChainLink {
   valid: boolean;
   notes?: string;
   transaction_id?: string;
+  source?: string;
 }
 
 // ── API response types ──────────────────────────────

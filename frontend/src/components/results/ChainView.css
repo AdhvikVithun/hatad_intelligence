@@ -215,3 +215,20 @@
 
 .chain-status--valid { color: var(--green); font-weight: 600; }
 .chain-status--invalid { color: var(--red); font-weight: 600; }
+
+/* Source badges */
+.chain-source-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #fff;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.chain-source-badge--sm {
+  padding: 1px 6px;
+  font-size: 9px;
+}

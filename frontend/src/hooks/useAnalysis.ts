@@ -388,6 +388,7 @@ export function useAnalysis() {
       source: string; target: string; date: string;
       transaction_type: string; document_number: string;
       valid: boolean; notes?: string; sequence: number;
+      docSource?: string;
     }> = [];
 
     chain.forEach((link) => {
@@ -402,6 +403,7 @@ export function useAnalysis() {
         source: fromId, target: toId, date: link.date,
         transaction_type: link.transaction_type, document_number: link.document_number,
         valid: link.valid, notes: link.notes, sequence: link.sequence,
+        docSource: link.source,
       });
     });
 
