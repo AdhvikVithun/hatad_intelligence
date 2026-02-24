@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 _active_rag_store: ContextVar = ContextVar("_active_rag_store", default=None)
 _embed_fn: ContextVar = ContextVar("_embed_fn", default=None)
 _active_memory_bank: ContextVar = ContextVar("_active_memory_bank", default=None)
+_active_doc_type: ContextVar = ContextVar("_active_doc_type", default="")
+_active_doc_type: ContextVar = ContextVar("_active_doc_type", default="")
 
 
 def set_rag_store(store, embed_fn=None):
@@ -28,9 +30,19 @@ def set_rag_store(store, embed_fn=None):
     _embed_fn.set(embed_fn)
 
 
+def set_active_doc_type(doc_type: str):
+    """Set the active document type for profile-aware RAG queries."""
+    _active_doc_type.set(doc_type)
+
+
 def set_memory_bank(bank):
     """Set the active Memory Bank for tool calls. Called by orchestrator."""
     _active_memory_bank.set(bank)
+
+
+def set_active_doc_type(doc_type: str):
+    """Set the active document type for profile-aware RAG queries."""
+    _active_doc_type.set(doc_type)
 
 
 def clear_rag_store():
@@ -535,6 +547,7 @@ def search_documents(
             filter_filename=filename,
             filter_transaction_type=transaction_type,
             query_text=query,
+            doc_type=_active_doc_type.get(""),
         )
 
         if not chunks:

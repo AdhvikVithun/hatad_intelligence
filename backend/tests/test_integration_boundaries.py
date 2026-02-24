@@ -542,13 +542,17 @@ class TestReportTemplateRendering:
         """Load the real Jinja2 template environment."""
         import jinja2
         from jinja2 import ChainableUndefined
+        from markupsafe import Markup
         from app.config import TEMPLATES_DIR
+        import mistune
 
         env = jinja2.Environment(
             loader=jinja2.FileSystemLoader(str(TEMPLATES_DIR)),
             autoescape=True,
             undefined=ChainableUndefined,
         )
+        _md = mistune.create_markdown(plugins=['table', 'strikethrough'])
+        env.filters['markdown'] = lambda text: Markup(_md(text)) if text else Markup('')
         return env
 
     def _make_context(self, *, include_docs=True, include_checks=True,

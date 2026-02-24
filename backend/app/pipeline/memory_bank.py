@@ -186,6 +186,36 @@ class MemoryBank:
         else:
             self._ingest_generic(filename, doc_type, data)
 
+        # Common: ingest _extraction_red_flags from any doc type
+        # These are the model's extraction-time observations about
+        # anomalies and concerns — store as risk facts
+        red_flags = data.get("_extraction_red_flags")
+        if red_flags and isinstance(red_flags, list):
+            for flag in red_flags:
+                if isinstance(flag, str) and flag.strip():
+                    self._add_fact(
+                        "risk", "extraction_red_flag",
+                        flag.strip()[:400], filename, doc_type,
+                        confidence=0.8,
+                        context="Flagged by model during structured data extraction",
+                    )
+
+        # Common: ingest _field_confidence for low-confidence fields
+        field_conf = data.get("_field_confidence")
+        if field_conf and isinstance(field_conf, dict):
+            low_conf_fields = [
+                f"{k} (conf={v})" for k, v in field_conf.items()
+                if isinstance(v, (int, float)) and v < 0.7
+            ]
+            if low_conf_fields:
+                self._add_fact(
+                    "risk", "low_confidence_fields",
+                    f"Low extraction confidence on: {', '.join(low_conf_fields)}",
+                    filename, doc_type,
+                    confidence=0.9,
+                    context="Model self-assessed confidence during extraction",
+                )
+
         self._ingested_files.append(filename)
         added = len(self.facts) - before
         logger.info(f"MemoryBank: {added} facts from {filename} ({doc_type})")
@@ -218,6 +248,109 @@ class MemoryBank:
         added = len(self.facts) - before
         if added:
             logger.info(f"MemoryBank: {added} risk facts from {filename}")
+        return added
+
+    def ingest_risk_classification_sale_deed(self, filename: str, sd_data: dict) -> int:
+        """Store risk classification facts from Sale Deed analysis.
+
+        Flags high-risk patterns: undervaluation, GPA-based sale, missing
+        encumbrance declaration, inadequate stamp duty, missing witnesses,
+        incomplete ownership history, minor parties.
+        """
+        before = len(self.facts)
+        fin = sd_data.get("financials", {}) or {}
+        consideration = fin.get("consideration_amount", 0) or 0
+        guideline = fin.get("guideline_value", 0) or 0
+        stamp_duty = fin.get("stamp_duty", 0) or 0
+
+        # Undervaluation check
+        if guideline > 0 and consideration > 0 and consideration < guideline * 0.7:
+            self._add_fact(
+                "risk", "undervaluation",
+                f"Consideration ₹{consideration:,} is below guideline ₹{guideline:,} "
+                f"({consideration/guideline:.0%})",
+                filename, "SALE_DEED",
+            )
+
+        # Stamp duty adequacy (TN: ~7% of max(consideration, guideline))
+        if consideration > 0:
+            expected_duty = max(consideration, guideline) * 0.07
+            if stamp_duty > 0 and stamp_duty < expected_duty * 0.5:
+                self._add_fact(
+                    "risk", "inadequate_stamp_duty",
+                    f"Stamp duty ₹{stamp_duty:,} appears low vs expected ~₹{int(expected_duty):,}",
+                    filename, "SALE_DEED",
+                )
+
+        # GPA-based sale
+        poa = sd_data.get("power_of_attorney", "")
+        if poa and isinstance(poa, str) and len(poa.strip()) > 5:
+            self._add_fact(
+                "risk", "gpa_sale",
+                f"Sale executed via Power of Attorney: {poa[:200]}",
+                filename, "SALE_DEED",
+            )
+
+        # Missing encumbrance declaration
+        enc = sd_data.get("encumbrance_declaration", "")
+        if not enc or (isinstance(enc, str) and len(enc.strip()) < 10):
+            self._add_fact(
+                "risk", "missing_encumbrance_declaration",
+                "No encumbrance declaration found in the Sale Deed",
+                filename, "SALE_DEED",
+            )
+
+        # Missing or insufficient witnesses
+        witnesses = sd_data.get("witnesses", [])
+        if isinstance(witnesses, list) and len(witnesses) < 2:
+            self._add_fact(
+                "risk", "insufficient_witnesses",
+                f"Only {len(witnesses)} witness(es) found — minimum 2 recommended",
+                filename, "SALE_DEED",
+            )
+
+        # Minor party check
+        for role in ("seller", "buyer"):
+            parties = sd_data.get(role, [])
+            if isinstance(parties, list):
+                for p in parties:
+                    if isinstance(p, dict):
+                        age_str = p.get("age", "")
+                        if age_str:
+                            try:
+                                age = int(str(age_str).strip().split()[0])
+                                if 0 < age < 18:
+                                    self._add_fact(
+                                        "risk", "minor_party",
+                                        f"{role.title()} '{p.get('name', '?')}' appears to be a minor (age {age})",
+                                        filename, "SALE_DEED",
+                                    )
+                            except (ValueError, IndexError):
+                                pass
+
+        # Incomplete ownership history
+        oh = sd_data.get("ownership_history", [])
+        if isinstance(oh, list) and len(oh) == 0:
+            self._add_fact(
+                "risk", "no_ownership_history",
+                "No ownership history extracted from deed recitals",
+                filename, "SALE_DEED",
+            )
+
+        # Red flags from extraction
+        red_flags = sd_data.get("_extraction_red_flags", [])
+        if isinstance(red_flags, list):
+            for flag in red_flags[:10]:
+                if isinstance(flag, str) and flag.strip():
+                    self._add_fact(
+                        "risk", "extraction_red_flag",
+                        flag.strip()[:300],
+                        filename, "SALE_DEED",
+                    )
+
+        added = len(self.facts) - before
+        if added:
+            logger.info(f"MemoryBank: {added} Sale Deed risk facts from {filename}")
         return added
 
     # ── EC ingestion ──
@@ -320,6 +453,51 @@ class MemoryBank:
                     transaction_id=tid,
                 )
 
+            # Suspicious flags — model's extraction-time red-flag analysis
+            # Stored BEFORE compaction strips them (Tier 1 drops suspicious_flags)
+            suspicious_flags = txn.get("suspicious_flags")
+            if suspicious_flags:
+                flags_list = suspicious_flags if isinstance(suspicious_flags, list) else [suspicious_flags]
+                for flag in flags_list:
+                    if flag and isinstance(flag, str) and flag.strip():
+                        self._add_fact(
+                            "risk", "ec_suspicious_flag",
+                            flag.strip(), src, stype,
+                            context=f"Transaction #{txn.get('row_number', '?')}: "
+                                    f"{txn.get('transaction_type', '')} Doc {txn.get('document_number', '?')}",
+                            transaction_id=tid,
+                        )
+
+            # Market value — government guideline reference from EC
+            market_val = txn.get("market_value")
+            if market_val:
+                self._add_fact(
+                    "financial", "ec_market_value",
+                    market_val, src, stype,
+                    context=f"Doc #{doc_num or '?'}: {txn.get('transaction_type', '')}",
+                    transaction_id=tid,
+                )
+
+            # PR number — previous registration reference
+            pr_num = txn.get("pr_number")
+            if pr_num:
+                self._add_fact(
+                    "reference", "ec_pr_number",
+                    pr_num, src, stype,
+                    context=f"Doc #{doc_num or '?'}: {txn.get('transaction_type', '')}",
+                    transaction_id=tid,
+                )
+
+            # Schedule remarks — property description details
+            schedule_remarks = txn.get("schedule_remarks")
+            if schedule_remarks and isinstance(schedule_remarks, str) and schedule_remarks.strip():
+                self._add_fact(
+                    "property", "ec_schedule_remarks",
+                    schedule_remarks.strip()[:500], src, stype,
+                    context=f"Transaction #{txn.get('row_number', '?')}",
+                    transaction_id=tid,
+                )
+
         # Build ownership chain summary
         if transactions:
             chain = []
@@ -347,21 +525,45 @@ class MemoryBank:
         self._add_fact("reference", "sro", data.get("sro"), src, stype)
         self._add_fact("timeline", "registration_date", data.get("registration_date"), src, stype)
 
-        # Parties — schema: seller/buyer are arrays of {name, father_name, age, address}
+        # Parties — schema: seller/buyer are arrays of {name, father_name, age, address, pan, aadhaar, share_percentage, identification_proof, relationship}
         seller = data.get("seller")
         buyer = data.get("buyer")
         if seller:
             if isinstance(seller, list):
                 for s in seller:
-                    name = s.get("name", s) if isinstance(s, dict) else str(s)
-                    self._add_fact("party", "seller", name, src, stype)
+                    if isinstance(s, dict):
+                        name = s.get("name", "")
+                        self._add_fact("party", "seller", name, src, stype)
+                        if s.get("aadhaar"):
+                            self._add_fact("party", "seller_aadhaar", s["aadhaar"], src, stype,
+                                           context=f"Aadhaar of seller {name}")
+                        if s.get("share_percentage"):
+                            self._add_fact("party", "seller_share", s["share_percentage"], src, stype,
+                                           context=f"Share of seller {name}")
+                        if s.get("pan"):
+                            self._add_fact("party", "seller_pan", s["pan"], src, stype,
+                                           context=f"PAN of seller {name}")
+                    else:
+                        self._add_fact("party", "seller", str(s), src, stype)
             else:
                 self._add_fact("party", "seller", str(seller), src, stype)
         if buyer:
             if isinstance(buyer, list):
                 for b in buyer:
-                    name = b.get("name", b) if isinstance(b, dict) else str(b)
-                    self._add_fact("party", "buyer", name, src, stype)
+                    if isinstance(b, dict):
+                        name = b.get("name", "")
+                        self._add_fact("party", "buyer", name, src, stype)
+                        if b.get("aadhaar"):
+                            self._add_fact("party", "buyer_aadhaar", b["aadhaar"], src, stype,
+                                           context=f"Aadhaar of buyer {name}")
+                        if b.get("share_percentage"):
+                            self._add_fact("party", "buyer_share", b["share_percentage"], src, stype,
+                                           context=f"Share of buyer {name}")
+                        if b.get("pan"):
+                            self._add_fact("party", "buyer_pan", b["pan"], src, stype,
+                                           context=f"PAN of buyer {name}")
+                    else:
+                        self._add_fact("party", "buyer", str(b), src, stype)
             else:
                 self._add_fact("party", "buyer", str(buyer), src, stype)
 
@@ -382,6 +584,12 @@ class MemoryBank:
             self._add_fact("property", "taluk", prop.get("taluk"), src, stype)
             self._add_fact("property", "district", prop.get("district"), src, stype)
             self._add_fact("property", "property_type", prop.get("property_type"), src, stype)
+            # New schema fields
+            self._add_fact("property", "land_classification", prop.get("land_classification"), src, stype)
+            self._add_fact("property", "plot_number", prop.get("plot_number"), src, stype)
+            self._add_fact("property", "door_number", prop.get("door_number"), src, stype)
+            self._add_fact("property", "measurement_reference", prop.get("measurement_reference"), src, stype)
+            self._add_fact("property", "assessment_number", prop.get("assessment_number"), src, stype)
 
         # Financial — schema nests under data["financials"]
         fin = data.get("financials", {})
@@ -392,16 +600,108 @@ class MemoryBank:
             self._add_fact("financial", "registration_fee", fin.get("registration_fee"), src, stype)
 
         # Witnesses — store as party facts for identity resolution
+        # Schema: witnesses is now array of {name, father_name, age, address}
         witnesses = data.get("witnesses", [])
         if isinstance(witnesses, list):
             for w in witnesses:
-                if isinstance(w, str) and w.strip():
+                if isinstance(w, dict):
+                    wname = w.get("name", "")
+                    if wname and isinstance(wname, str) and wname.strip():
+                        detail = wname.strip()
+                        if w.get("father_name"):
+                            detail += f" s/o {w['father_name']}"
+                        self._add_fact("party", "witness", detail, src, stype)
+                elif isinstance(w, str) and w.strip():
                     self._add_fact("party", "witness", w.strip(), src, stype)
 
-        # Previous ownership
+        # Stamp paper details
+        stamp_paper = data.get("stamp_paper")
+        if isinstance(stamp_paper, dict):
+            serials = stamp_paper.get("serial_numbers")
+            if isinstance(serials, list):
+                for sn in serials:
+                    if sn and isinstance(sn, str) and sn.strip():
+                        self._add_fact("reference", "stamp_serial", sn.strip(), src, stype)
+            if stamp_paper.get("vendor_name"):
+                self._add_fact("reference", "stamp_vendor", stamp_paper["vendor_name"], src, stype)
+            if stamp_paper.get("total_stamp_value"):
+                self._add_fact("financial", "total_stamp_value",
+                               stamp_paper["total_stamp_value"], src, stype)
+
+        # Registration details (book/volume/page)
+        reg_details = data.get("registration_details")
+        if isinstance(reg_details, dict):
+            self._add_fact("reference", "book_number", reg_details.get("book_number"), src, stype)
+            self._add_fact("reference", "volume_number", reg_details.get("volume_number"), src, stype)
+            self._add_fact("reference", "page_number", reg_details.get("page_number"), src, stype)
+            self._add_fact("reference", "certified_copy_number",
+                           reg_details.get("certified_copy_number"), src, stype)
+            self._add_fact("timeline", "certified_copy_date",
+                           reg_details.get("certified_copy_date"), src, stype)
+
+        # Previous ownership (single immediate predecessor — backward compat)
         prev = data.get("previous_ownership")
         if prev:
             self._add_fact("chain", "previous_ownership", prev, src, stype)
+
+        # Full ownership history (story of the land — from deed recitals)
+        ownership_history = data.get("ownership_history")
+        if ownership_history and isinstance(ownership_history, list):
+            # Store the complete chain as a single structured fact for queries
+            self._add_fact("chain", "ownership_history", ownership_history, src, stype)
+
+            # Also store individual chain links for fine-grained cross-referencing
+            for i, link in enumerate(ownership_history):
+                if not isinstance(link, dict):
+                    continue
+                owner = link.get("owner", "")
+                acquired_from = link.get("acquired_from", "")
+                mode = link.get("acquisition_mode", "")
+                doc_num = link.get("document_number", "")
+                doc_date = link.get("document_date", "")
+                remarks = link.get("remarks", "")
+
+                summary = f"{acquired_from} → {owner}" if acquired_from else owner
+                if mode:
+                    summary += f" ({mode})"
+                if doc_num:
+                    summary += f" [Doc {doc_num}"
+                    if doc_date:
+                        summary += f", {doc_date}"
+                    summary += "]"
+                if remarks:
+                    summary += f" — {remarks}"
+
+                self._add_fact(
+                    "chain", "recital_transfer", summary, src, stype,
+                    context=f"Ownership history entry {i + 1}/{len(ownership_history)}",
+                )
+
+                # Store prior owner names as party facts for identity resolution
+                if owner and isinstance(owner, str) and owner.strip():
+                    self._add_fact("party", "prior_owner", owner.strip(), src, stype,
+                                   context=f"Recital chain link {i + 1}: {mode or 'transfer'}")
+
+        # Special conditions — restrictive covenants, developer obligations
+        special_conditions = data.get("special_conditions")
+        if special_conditions and isinstance(special_conditions, list):
+            for i, cond in enumerate(special_conditions[:15]):
+                if isinstance(cond, str) and cond.strip():
+                    self._add_fact("encumbrance", "special_condition",
+                                   cond.strip()[:300], src, stype,
+                                   context=f"Condition {i + 1}/{len(special_conditions)}")
+
+        # Encumbrance declaration — seller's statement about existing encumbrances
+        enc_decl = data.get("encumbrance_declaration")
+        if enc_decl and isinstance(enc_decl, str) and enc_decl.strip():
+            self._add_fact("encumbrance", "encumbrance_declaration",
+                           enc_decl.strip()[:500], src, stype)
+
+        # Payment mode — cash/cheque/NEFT (legally significant for black money checks)
+        payment_mode = data.get("payment_mode")
+        if payment_mode and isinstance(payment_mode, str) and payment_mode.strip():
+            self._add_fact("financial", "payment_mode",
+                           payment_mode.strip(), src, stype)
 
     # ── Patta/Chitta ingestion ──
 
@@ -589,6 +889,17 @@ class MemoryBank:
                            f"Adangal classifies this land as: {data.get('soil_type')}",
                            src, stype)
 
+    # ── Helper: extract name from party field (may be dict or plain string) ──
+
+    @staticmethod
+    def _name_from_party(val) -> str | None:
+        """Extract name from a party field that may be a dict or a plain string."""
+        if isinstance(val, dict):
+            return val.get("name")
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+        return None
+
     # ── Layout Approval ingestion ──
 
     def _ingest_layout_approval(self, filename: str, data: dict):
@@ -602,8 +913,8 @@ class MemoryBank:
         self._add_fact("property", "layout_status", data.get("status"), src, stype)
         self._add_fact("property", "layout_total_plots", data.get("total_plots"), src, stype)
 
-        # Survey reference
-        parent_surveys = data.get("parent_survey_numbers")
+        # Survey reference — schema field is "survey_number" (not "parent_survey_numbers")
+        parent_surveys = data.get("survey_number") or data.get("parent_survey_numbers")
         if parent_surveys:
             self._add_fact("property", "survey_number", parent_surveys, src, stype)
 
@@ -648,11 +959,12 @@ class MemoryBank:
         src = filename
         stype = "POA"
 
-        self._add_fact("reference", "poa_document_number", data.get("document_number"), src, stype)
+        self._add_fact("reference", "poa_document_number",
+                      data.get("registration_number") or data.get("document_number"), src, stype)
         self._add_fact("reference", "sro", data.get("sro"), src, stype)
         self._add_fact("timeline", "poa_registration_date", data.get("registration_date"), src, stype)
-        self._add_fact("party", "poa_principal", data.get("principal"), src, stype)
-        self._add_fact("party", "poa_agent", data.get("agent"), src, stype)
+        self._add_fact("party", "poa_principal", self._name_from_party(data.get("principal")), src, stype)
+        self._add_fact("party", "poa_agent", self._name_from_party(data.get("agent")), src, stype)
         poa_kind = data.get("is_general_or_specific") or data.get("poa_type")
         self._add_fact("property", "poa_type", poa_kind, src, stype)
         self._add_fact("property", "poa_revocation_status", data.get("revocation_status"), src, stype)
@@ -704,9 +1016,10 @@ class MemoryBank:
         stype = "WILL"
 
         self._add_fact("reference", "will_registration", data.get("registration_number"), src, stype)
-        self._add_fact("party", "testator", data.get("testator"), src, stype)
-        self._add_fact("party", "executor", data.get("executor"), src, stype)
-        self._add_fact("timeline", "will_date", data.get("will_date"), src, stype)
+        self._add_fact("party", "testator", self._name_from_party(data.get("testator")), src, stype)
+        self._add_fact("party", "executor", self._name_from_party(data.get("executor")), src, stype)
+        self._add_fact("timeline", "will_date",
+                      data.get("execution_date") or data.get("will_date"), src, stype)
         self._add_fact("encumbrance", "probate_status", data.get("probate_status"), src, stype)
 
         # Beneficiaries
@@ -741,12 +1054,18 @@ class MemoryBank:
         src = filename
         stype = "PARTITION_DEED"
 
-        self._add_fact("reference", "partition_deed_number", data.get("document_number"), src, stype)
+        self._add_fact("reference", "partition_deed_number",
+                      data.get("registration_number") or data.get("document_number"), src, stype)
         self._add_fact("reference", "sro", data.get("sro"), src, stype)
         self._add_fact("timeline", "partition_date", data.get("registration_date"), src, stype)
         self._add_fact("property", "original_property", data.get("original_property"), src, stype)
-        self._add_fact("property", "survey_number", data.get("original_survey_numbers"), src, stype)
-        self._add_fact("property", "village", data.get("village"), src, stype)
+        # survey_number & village are nested inside original_property in schema
+        orig_prop = data.get("original_property") or {}
+        orig_prop = orig_prop if isinstance(orig_prop, dict) else {}
+        self._add_fact("property", "survey_number",
+                      orig_prop.get("survey_number") or data.get("original_survey_numbers"), src, stype)
+        self._add_fact("property", "village",
+                      orig_prop.get("village") or data.get("village"), src, stype)
 
         # Joint owners — handle list of dicts or list of strings
         joint_owners = data.get("joint_owners", [])
@@ -785,13 +1104,18 @@ class MemoryBank:
         src = filename
         stype = "GIFT_DEED"
 
-        self._add_fact("reference", "gift_deed_number", data.get("document_number"), src, stype)
+        self._add_fact("reference", "gift_deed_number",
+                      data.get("registration_number") or data.get("document_number"), src, stype)
         self._add_fact("reference", "sro", data.get("sro"), src, stype)
         self._add_fact("timeline", "gift_deed_date", data.get("registration_date"), src, stype)
-        self._add_fact("party", "donor", data.get("donor"), src, stype)
-        self._add_fact("party", "donee", data.get("donee"), src, stype)
+        self._add_fact("party", "donor", self._name_from_party(data.get("donor")), src, stype)
+        self._add_fact("party", "donee", self._name_from_party(data.get("donee")), src, stype)
         self._add_fact("property", "gift_property", data.get("property"), src, stype)
-        self._add_fact("property", "survey_number", data.get("survey_number"), src, stype)
+        # survey_number is nested inside property in schema
+        prop = data.get("property") or {}
+        prop = prop if isinstance(prop, dict) else {}
+        self._add_fact("property", "survey_number",
+                      prop.get("survey_number") or data.get("survey_number"), src, stype)
 
         # Consideration should be 0 for genuine gift
         consideration = data.get("consideration_amount")
@@ -812,12 +1136,15 @@ class MemoryBank:
         src = filename
         stype = "RELEASE_DEED"
 
-        self._add_fact("reference", "release_deed_number", data.get("document_number"), src, stype)
+        self._add_fact("reference", "release_deed_number",
+                      data.get("registration_number") or data.get("document_number"), src, stype)
         self._add_fact("reference", "sro", data.get("sro"), src, stype)
         self._add_fact("timeline", "release_deed_date", data.get("registration_date"), src, stype)
-        self._add_fact("party", "releasing_party", data.get("releasing_party"), src, stype)
+        self._add_fact("party", "releasing_party",
+                      self._name_from_party(data.get("releasing_party")), src, stype)
         self._add_fact("party", "release_beneficiary",
-                       data.get("beneficiary") or data.get("beneficiary_party"), src, stype)
+                      self._name_from_party(data.get("beneficiary") or data.get("beneficiary_party")),
+                      src, stype)
         self._add_fact("encumbrance", "claim_released", data.get("claim_released"), src, stype)
 
         # Original document reference — important for EC cross-check
@@ -830,7 +1157,8 @@ class MemoryBank:
         else:
             orig = {}
         if orig:
-            self._add_fact("reference", "release_original_doc_type", orig.get("type"), src, stype)
+            self._add_fact("reference", "release_original_doc_type",
+                          orig.get("document_type") or orig.get("type"), src, stype)
             self._add_fact("reference", "release_original_doc_number", orig.get("number"), src, stype)
             self._add_fact("reference", "release_original_sro", orig.get("sro"), src, stype)
 
@@ -1314,5 +1642,61 @@ class MemoryBank:
             lines.append("\n--- FINANCIAL ---")
             for f in fin_facts:
                 lines.append(f"  {f['key']}: {f['value']} (from {f['source_file']})")
+
+        # Timeline facts — dates, periods, sequences
+        timeline_facts = self.get_facts_by_category("timeline")
+        if timeline_facts:
+            lines.append("\n--- TIMELINE ---")
+            for f in timeline_facts:
+                ctx = f" [{f['context']}]" if f.get("context") else ""
+                lines.append(f"  {f['key']}: {f['value']} (from {f['source_file']}){ctx}")
+
+        # Encumbrance facts — mortgages, liens, restrictions
+        enc_facts = self.get_facts_by_category("encumbrance")
+        if enc_facts:
+            lines.append("\n--- ENCUMBRANCES & RESTRICTIONS ---")
+            for f in enc_facts:
+                ctx = f" [{f['context']}]" if f.get("context") else ""
+                lines.append(f"  {f['key']}: {f['value']} (from {f['source_file']}){ctx}")
+
+        # Chain of title facts — ownership transfers
+        chain_facts = self.get_facts_by_category("chain")
+        if chain_facts:
+            lines.append("\n--- CHAIN OF TITLE ---")
+            for f in chain_facts:
+                val = f['value']
+                if isinstance(val, list):
+                    # Structured chain — format each link
+                    lines.append(f"  {f['key']} (from {f['source_file']}):")
+                    for link in val[:20]:  # Cap display at 20 links
+                        if isinstance(link, dict):
+                            from_p = link.get("from", "?")
+                            to_p = link.get("to", "?")
+                            ltype = link.get("type", "")
+                            ldate = link.get("date", "")
+                            lines.append(f"    {from_p} → {to_p} ({ltype}, {ldate})")
+                        else:
+                            lines.append(f"    {link}")
+                    if len(val) > 20:
+                        lines.append(f"    ... and {len(val) - 20} more transfers")
+                else:
+                    ctx = f" [{f['context']}]" if f.get("context") else ""
+                    lines.append(f"  {f['key']}: {val} (from {f['source_file']}){ctx}")
+
+        # Cross-document references — EC numbers, deed numbers, SRO, patta numbers
+        ref_facts = self.get_facts_by_category("reference")
+        if ref_facts:
+            lines.append("\n--- REFERENCES ---")
+            for f in ref_facts:
+                ctx = f" [{f['context']}]" if f.get("context") else ""
+                lines.append(f"  {f['key']}: {f['value']} (from {f['source_file']}){ctx}")
+
+        # Risk flags — red flags, anomalies, concerns
+        risk_facts = self.get_facts_by_category("risk")
+        if risk_facts:
+            lines.append("\n--- RISK FLAGS ---")
+            for f in risk_facts:
+                ctx = f" [{f['context']}]" if f.get("context") else ""
+                lines.append(f"  ⚠ {f['key']}: {f['value']} (from {f['source_file']}){ctx}")
 
         return "\n".join(lines)

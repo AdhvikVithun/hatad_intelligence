@@ -1,5 +1,6 @@
 ﻿import { useState, useCallback } from 'react';
 import { useAnalysis } from './hooks/useAnalysis';
+import { useChat } from './hooks/useChat';
 import { Bootloader } from './components/boot/Bootloader';
 import { TopBar } from './components/layout/TopBar';
 import { Sidebar } from './components/layout/Sidebar';
@@ -26,6 +27,10 @@ export default function App() {
   const handleBootReady = useCallback(() => setBooted(true), []);
 
   const a = useAnalysis();
+
+  const [chatOpen, setChatOpen] = useState(false);
+  const toggleChat = useCallback(() => setChatOpen(prev => !prev), []);
+  const chat = useChat(a.sessionId);
 
   const showWelcome = !a.session && !a.processing && a.progress.length === 0 && !['log'].includes(a.activeTab);
 
@@ -92,6 +97,17 @@ export default function App() {
                   <div className="pipeline-failed-banner__title">Analysis did not complete successfully</div>
                   <div className="pipeline-failed-banner__desc">
                     Review the pipeline log above for error details, or clear and start a new analysis.
+                    {a.sessionId && (
+                      <>
+                        {' '}Or{' '}
+                        <button
+                          className="pipeline-failed-banner__retry"
+                          onClick={() => a.loadPastSession(a.sessionId!)}
+                        >
+                          retry loading results
+                        </button>.
+                      </>
+                    )}
                   </div>
                 </div>
               </div>
@@ -198,6 +214,14 @@ export default function App() {
           transactions={a.transactions}
           pipeline={a.pipeline}
           formatDuration={a.formatDuration}
+          chatOpen={chatOpen}
+          onToggleChat={toggleChat}
+          chatMessages={chat.messages}
+          chatStreaming={chat.streaming}
+          chatThinking={chat.thinking}
+          chatError={chat.error}
+          onChatSend={chat.sendMessage}
+          onChatClear={chat.clearChat}
         />
       </div>
 

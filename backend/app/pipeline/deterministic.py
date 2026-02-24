@@ -143,10 +143,10 @@ def check_ec_period_coverage(extracted_data: dict) -> list[dict]:
 
             _trace(f"EC_PERIOD [{filename}] span={span_days}d, threshold=365d")
 
-            # Check 2: EC recency — period_to should be within last 90 days
+            # Check 2: EC recency — period_to should be within last 30 days
             ec_age_days = (now - period_to).days
-            _trace(f"EC_RECENCY [{filename}] age={ec_age_days}d, threshold=90d")
-            if ec_age_days > 90:
+            _trace(f"EC_RECENCY [{filename}] age={ec_age_days}d, threshold=30d")
+            if ec_age_days > 30:
                 checks.append(_make_check(
                     "DET_EC_STALE", "EC Not Recent",
                     "HIGH", "WARNING",
@@ -3314,6 +3314,14 @@ def run_deterministic_checks(
     Returns:
         List of check dicts ready to be merged into verification results
     """
+    # Sanitize: replace None data payloads (from failed extractions) with empty
+    # dicts so every check function can safely call .get() without crashing.
+    extracted_data = {
+        fname: {**entry, "data": entry.get("data") or {}}
+        for fname, entry in extracted_data.items()
+        if isinstance(entry, dict)
+    }
+
     all_checks = []
 
     check_functions = [

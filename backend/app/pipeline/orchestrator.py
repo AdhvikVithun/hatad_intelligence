@@ -1,12 +1,14 @@
 """Pipeline orchestrator - coordinates the full analysis workflow.
 
-Text-only architecture (Sarvam OCR + GPT-OSS):
-  Stage 1  → Text extraction (pdfplumber + Sarvam AI Tamil OCR)
-  Stage 2  → Document classification (GPT-OSS)
-  Stage 3  → Structured data extraction (GPT-OSS, chunked)
+Text-only architecture (Sarvam OCR + Adobe PDF Services + GPT-OSS):
+  Stage 1   → Text extraction (pdfplumber)
+  Stage 1b  → Sarvam AI (primary Tamil image OCR)
+  Stage 1c  → Adobe PDF Services (fallback cloud OCR)
+  Stage 2   → Document classification (GPT-OSS)
+  Stage 3   → Structured data extraction (GPT-OSS, chunked)
   Stage 3.5 → Document summarization (trim large payloads)
-  Stage 4  → Multi-pass verification (5 focused LLM calls)
-  Stage 5  → Narrative report (LLM, compact input)
+  Stage 4   → Multi-pass verification (5 focused LLM calls)
+  Stage 5   → Narrative report (LLM, compact input)
 """
 
 import json
@@ -22,9 +24,10 @@ from typing import AsyncGenerator
 
 from app.config import (UPLOAD_DIR, SESSIONS_DIR, PROMPTS_DIR, RAG_ENABLED,
                         LLM_MAX_CONCURRENT_CHUNKS,
-                        SARVAM_ENABLED)
+                        SARVAM_ENABLED, ADOBE_PDF_ENABLED)
 from app.pipeline.ingestion import extract_text_from_pdf
 from app.pipeline.sarvam_ocr import sarvam_extract_text, merge_sarvam_with_pdfplumber
+from app.pipeline.adobe_ocr import adobe_extract_text, merge_adobe_with_existing
 from app.pipeline.classifier import classify_document
 from app.pipeline.llm_client import call_llm, LLMProgressCallback
 from app.pipeline.summarizer import summarize_document, build_compact_summary
@@ -55,6 +58,7 @@ from app.pipeline.schemas import (VERIFY_GROUP_SCHEMAS, EXTRACT_PATTA_SCHEMA,
                                    EXTRACT_GIFT_DEED_SCHEMA, EXTRACT_RELEASE_DEED_SCHEMA,
                                    EXTRACT_A_REGISTER_SCHEMA, EXTRACT_CHITTA_SCHEMA)
 from app.pipeline.tools import (OLLAMA_TOOLS, set_rag_store, clear_rag_store, set_memory_bank,
+                                set_active_doc_type,
                                 lookup_guideline_value, verify_sro_jurisdiction, check_document_age)
 from app.pipeline.deterministic import run_deterministic_checks, build_chain_of_title
 from app.pipeline.self_reflection import run_self_reflection, apply_amendments
@@ -184,6 +188,49 @@ VERIFY_GROUPS = [
 # Group 6 (meta) is special — it receives results from groups 1-5, not doc data
 
 
+# ── CoT Thinking Risk Extraction ──
+# Patterns that indicate the model identified a concern during extraction
+_COT_RISK_PATTERNS = re.compile(
+    r'(?:suspicious|concerning|unusual|anomal|irregular|risk|caution|warning|'
+    r'discrepan|inconsisten|mismatch|missing|absent|forged|fabricat|'
+    r'fake|backdated|undisclosed|unreported|encumbrance|mortgage|lien|'
+    r'attachment|injunction|probate|poramboke|government land|'
+    r'minor|underage|deceased|disputed|litigation|court order|lis pendens|'
+    r'broken chain|gap in title|title defect|stamp duty.*(?:short|deficit|underpaid)|'
+    r'consideration.*(?:low|high|unreasonable|suspicious)|rapid flipping)',
+    re.IGNORECASE
+)
+
+
+def _extract_cot_risk_insights(thinking_text: str) -> list[str]:
+    """Extract risk-relevant insights from extraction CoT thinking.
+
+    Scans the model's chain-of-thought reasoning for sentences that
+    mention risk patterns. Returns deduplicated risk insight strings
+    suitable for storage in the memory bank.
+    """
+    if not thinking_text or len(thinking_text) < 50:
+        return []
+
+    insights = []
+    seen = set()
+    # Split into sentences (rough approximation)
+    sentences = re.split(r'[.!?\n]', thinking_text)
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if len(sentence) < 20 or len(sentence) > 500:
+            continue
+        if _COT_RISK_PATTERNS.search(sentence):
+            # Normalize for dedup
+            key = sentence.lower()[:80]
+            if key not in seen:
+                seen.add(key)
+                insights.append(sentence[:400])
+
+    # Cap at 10 most relevant insights per document
+    return insights[:10]
+
+
 class AnalysisSession:
     """Manages a single analysis session (one property, multiple documents)."""
 
@@ -201,6 +248,7 @@ class AnalysisSession:
         self.risk_band = None
         self.identity_clusters = None
         self.error = None
+        self.chat_history = []
 
     def _log(self, stage: str, message: str, detail: dict | None = None):
         entry = {
@@ -252,6 +300,7 @@ class AnalysisSession:
             "risk_band": self.risk_band,
             "identity_clusters": self.identity_clusters,
             "error": self.error,
+            "chat_history": self.chat_history,
         }
 
     # Only these fields can be loaded from disk — prevents setattr injection
@@ -259,7 +308,7 @@ class AnalysisSession:
         "session_id", "created_at", "status", "progress", "documents",
         "extracted_data", "memory_bank", "verification_result",
         "narrative_report", "risk_score", "risk_band",
-        "identity_clusters", "error",
+        "identity_clusters", "error", "chat_history",
     })
 
     @classmethod
@@ -328,7 +377,7 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
             extraction_quality = text_data.get("extraction_quality", "HIGH")
             quality_note = ""
             if extraction_quality in ("LOW", "EMPTY"):
-                quality_note = " (Sarvam OCR will enhance in Stage 1b)"
+                quality_note = " (Sarvam/Adobe OCR will enhance in Stage 1b/1c)"
 
             session.documents.append({
                 "filename": fp.name,
@@ -342,48 +391,106 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
             yield _update(session, "extraction", 
                          f"Extracted {text_data['total_pages']} pages from {fp.name}{quality_note}")
 
-        # ── Stage 1b: HATAD Vision parallel OCR (when enabled) ──
+        # ── Stage 1b: HATAD Vision / Sarvam AI (primary Tamil image OCR) ──
         if SARVAM_ENABLED:
-            yield _update(session, "extraction",
-                         "HATAD Vision: uploading documents for Tamil-optimised OCR...")
+            # Identify files at LOW/EMPTY/MIXED quality after pdfplumber
+            sarvam_candidates = []
+            for fp in file_paths:
+                tdata = extracted_texts.get(fp.name, {})
+                quality = tdata.get("extraction_quality", "HIGH")
+                if quality in ("LOW", "EMPTY", "MIXED"):
+                    sarvam_candidates.append(fp)
 
-            async def _sarvam_one(fname, fpath):
-                return fname, await sarvam_extract_text(fpath, on_progress=_llm_progress)
+            if sarvam_candidates:
+                names = ", ".join(fp.name for fp in sarvam_candidates)
+                yield _update(session, "extraction",
+                             f"HATAD Vision: enhancing {len(sarvam_candidates)} document(s) ({names})...")
 
-            sarvam_tasks = [
-                _sarvam_one(fp.name, fp) for fp in file_paths
-            ]
-            sarvam_results = await asyncio.gather(*sarvam_tasks, return_exceptions=True)
+                async def _sarvam_one(fname, fpath):
+                    return fname, await sarvam_extract_text(fpath, on_progress=_llm_progress)
 
-            for result in sarvam_results:
-                if isinstance(result, Exception):
-                    logger.error(f"HATAD Vision extraction error: {result}")
-                    continue
-                fname, sarvam_data = result
-                if sarvam_data is None:
-                    continue
+                sarvam_tasks = [_sarvam_one(fp.name, fp) for fp in sarvam_candidates]
+                sarvam_results = await asyncio.gather(*sarvam_tasks, return_exceptions=True)
 
-                # Merge HATAD Vision with existing pdfplumber result
-                pdfplumber_data = extracted_texts[fname]
-                merged = merge_sarvam_with_pdfplumber(sarvam_data, pdfplumber_data)
-                extracted_texts[fname] = merged
+                for result in sarvam_results:
+                    if isinstance(result, Exception):
+                        logger.error(f"HATAD Vision extraction error: {result}")
+                        continue
+                    fname, sarvam_data = result
+                    if sarvam_data is None:
+                        continue
 
-                sarvam_used = merged.get("sarvam_pages", 0)
-                if sarvam_used > 0:
-                    # Update document metadata
-                    for doc in session.documents:
-                        if doc["filename"] == fname:
-                            doc["sarvam_pages"] = sarvam_used
-                            doc["extraction_quality"] = merged["extraction_quality"]
-                            break
-                    yield _update(session, "extraction",
-                                 f"HATAD Vision: {sarvam_used}/{merged['total_pages']} pages "
-                                 f"enhanced for {fname}")
+                    # Merge HATAD Vision with existing result
+                    existing_data = extracted_texts[fname]
+                    merged = merge_sarvam_with_pdfplumber(sarvam_data, existing_data)
+                    extracted_texts[fname] = merged
 
-            # Flush any LLM-style progress from HATAD Vision callbacks
-            for upd in llm_updates:
-                yield upd
-            llm_updates.clear()
+                    sarvam_used = merged.get("sarvam_pages", 0)
+                    if sarvam_used > 0:
+                        for doc in session.documents:
+                            if doc["filename"] == fname:
+                                doc["sarvam_pages"] = sarvam_used
+                                doc["extraction_quality"] = merged["extraction_quality"]
+                                break
+                        yield _update(session, "extraction",
+                                     f"HATAD Vision: {sarvam_used}/{merged['total_pages']} pages "
+                                     f"enhanced for {fname}")
+
+                # Flush any LLM-style progress from HATAD Vision callbacks
+                for upd in llm_updates:
+                    yield upd
+                llm_updates.clear()
+
+        # ── Stage 1c: Adobe PDF Services (fallback for docs still LOW/EMPTY) ──
+        if ADOBE_PDF_ENABLED:
+            # Only process documents still at LOW/EMPTY quality after Sarvam
+            adobe_candidates = []
+            for fp in file_paths:
+                tdata = extracted_texts.get(fp.name, {})
+                quality = tdata.get("extraction_quality", "HIGH")
+                sarvam_pages = tdata.get("sarvam_pages", 0)
+                if quality in ("LOW", "EMPTY") or (quality == "MIXED" and sarvam_pages == 0):
+                    adobe_candidates.append(fp)
+
+            if adobe_candidates:
+                names = ", ".join(fp.name for fp in adobe_candidates)
+                yield _update(session, "extraction",
+                             f"Adobe PDF Services: uploading {len(adobe_candidates)} document(s) "
+                             f"for structured OCR ({names})...")
+
+                async def _adobe_one(fname, fpath):
+                    return fname, await adobe_extract_text(fpath, on_progress=_llm_progress)
+
+                adobe_tasks = [_adobe_one(fp.name, fp) for fp in adobe_candidates]
+                adobe_results = await asyncio.gather(*adobe_tasks, return_exceptions=True)
+
+                for result in adobe_results:
+                    if isinstance(result, Exception):
+                        logger.error(f"Adobe PDF extraction error: {result}")
+                        continue
+                    fname, adobe_data = result
+                    if adobe_data is None:
+                        continue
+
+                    existing_data = extracted_texts[fname]
+                    merged = merge_adobe_with_existing(adobe_data, existing_data)
+                    extracted_texts[fname] = merged
+
+                    adobe_used = merged.get("adobe_pages", 0)
+                    if adobe_used > 0:
+                        for doc in session.documents:
+                            if doc["filename"] == fname:
+                                doc["adobe_pages"] = adobe_used
+                                doc["extraction_quality"] = merged["extraction_quality"]
+                                break
+                        yield _update(session, "extraction",
+                                     f"Adobe PDF: {adobe_used}/{merged['total_pages']} pages "
+                                     f"enhanced for {fname}")
+
+                # Flush any progress from Adobe callbacks
+                for upd in llm_updates:
+                    yield upd
+                llm_updates.clear()
 
         # ═══════════════════════════════════════════
         # STAGE 2: DOCUMENT CLASSIFICATION (parallel — GPT-OSS text classification)
@@ -484,40 +591,69 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
         # STAGE 3: STRUCTURED DATA EXTRACTION
         # Text-only architecture: Sarvam provides OCR text,
         # GPT-OSS does all extraction/reasoning from that text.
+        # Parallelized with semaphore — real speedup requires
+        # OLLAMA_NUM_PARALLEL>=EXTRACTION_CONCURRENCY.
         # ═══════════════════════════════════════════
-        yield _update(session, "data_extraction", "Extracting structured data from each document...", save=True)
+        from app.config import EXTRACTION_CONCURRENCY
+        _extract_sem = asyncio.Semaphore(EXTRACTION_CONCURRENCY)
 
-        for doc in session.documents:
+        async def _extract_one_doc(doc):
+            """Run extraction for a single document under semaphore."""
             doc_type = doc.get("document_type", "OTHER")
             filename = doc["filename"]
             text_data = extracted_texts[filename]
-
             extractor = EXTRACTORS.get(doc_type, DEFAULT_EXTRACTOR)
-            yield _update(session, "data_extraction",
-                         f"Analyzing {filename} as {doc_type} (GPT-OSS)...")
-            try:
-                # Pass pre-extraction RAG store to EC extractor for header injection
-                extra_kwargs = {}
-                if doc_type == "EC" and pre_rag_store and pre_embed_fn:
-                    extra_kwargs["rag_store"] = pre_rag_store
-                    extra_kwargs["embed_fn"] = pre_embed_fn
 
-                extracted = await extractor.extract(
-                    text_data, on_progress=_llm_progress,
-                    filename=filename, file_path=file_path_map.get(filename),
-                    **extra_kwargs,
-                )
-                # Flush progress events immediately (fixes speed=0.0 display)
-                for upd in llm_updates:
-                    yield upd
-                llm_updates.clear()
+            extra_kwargs = {}
+            if pre_rag_store and pre_embed_fn:
+                extra_kwargs["rag_store"] = pre_rag_store
+                extra_kwargs["embed_fn"] = pre_embed_fn
 
+            async with _extract_sem:
+                try:
+                    extracted = await extractor.extract(
+                        text_data, on_progress=_llm_progress,
+                        filename=filename, file_path=file_path_map.get(filename),
+                        **extra_kwargs,
+                    )
+                    return filename, doc_type, extracted, None
+                except Exception as e:
+                    return filename, doc_type, None, e
+
+        n_docs = len(session.documents)
+        eff_concurrency = min(EXTRACTION_CONCURRENCY, n_docs)
+        yield _update(session, "data_extraction",
+                     f"Extracting structured data from {n_docs} document(s) "
+                     f"(concurrency: {eff_concurrency})...", save=True)
+
+        # Pre-fire all extraction tasks — semaphore limits actual concurrency
+        extraction_tasks = [
+            asyncio.create_task(_extract_one_doc(doc))
+            for doc in session.documents
+        ]
+
+        # Await in order, yielding progress between completions
+        for task in extraction_tasks:
+            filename, doc_type, extracted, error = await task
+
+            # Flush accumulated progress updates
+            for upd in llm_updates:
+                yield upd
+            llm_updates.clear()
+
+            if error:
+                session.extracted_data[filename] = {
+                    "document_type": doc_type,
+                    "data": None,
+                    "error": str(error),
+                }
+                yield _update(session, "data_extraction",
+                             f"Warning: Could not fully extract {filename}: {error}")
+            else:
                 session.extracted_data[filename] = {
                     "document_type": doc_type,
                     "data": extracted,
                 }
-
-                # Report extraction confidence
                 if isinstance(extracted, dict):
                     conf = extracted.get("_confidence", "N/A")
                     yield _update(session, "data_extraction",
@@ -525,18 +661,6 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                 else:
                     yield _update(session, "data_extraction",
                                  f"Extracted structured data from {filename}")
-            except Exception as e:
-                # Flush any queued progress before reporting error
-                for upd in llm_updates:
-                    yield upd
-                llm_updates.clear()
-                session.extracted_data[filename] = {
-                    "document_type": doc_type,
-                    "data": None,
-                    "error": str(e),
-                }
-                yield _update(session, "data_extraction",
-                             f"Warning: Could not fully extract {filename}: {e}")
 
         # ── Extraction completeness audit ──
         for filename, data in session.extracted_data.items():
@@ -561,6 +685,80 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                                  f"{filename}: {actual}/{declared} entries extracted "
                                  f"({actual/declared:.0%} complete)")
 
+            # ── Sale Deed completeness audit ──
+            if data.get("document_type") == "SALE_DEED" and data.get("data"):
+                sd = data["data"]
+                issues: list[str] = []
+
+                # Party completeness — check sub-fields
+                for role in ("seller", "buyer"):
+                    parties = sd.get(role, [])
+                    if not parties:
+                        issues.append(f"No {role}s extracted")
+                    elif isinstance(parties, list):
+                        for i, p in enumerate(parties):
+                            if isinstance(p, dict):
+                                if not p.get("name"):
+                                    issues.append(f"{role}[{i}] missing name")
+                                if not p.get("father_name"):
+                                    issues.append(f"{role}[{i}] missing father_name")
+
+                # Financial sanity
+                fin = sd.get("financials", {})
+                if isinstance(fin, dict):
+                    consideration = fin.get("consideration_amount", 0) or 0
+                    guideline = fin.get("guideline_value", 0) or 0
+                    stamp_duty = fin.get("stamp_duty", 0) or 0
+                    if consideration == 0:
+                        issues.append("Consideration amount is 0 — likely extraction failure")
+                    if guideline > 0 and consideration > 0 and consideration < guideline * 0.7:
+                        issues.append(
+                            f"Consideration (₹{consideration:,}) is <70% of guideline "
+                            f"(₹{guideline:,}) — possible undervaluation"
+                        )
+                    if stamp_duty == 0:
+                        issues.append("Stamp duty is 0 — may be missing")
+
+                # Property completeness
+                prop = sd.get("property", {})
+                if isinstance(prop, dict):
+                    if not prop.get("survey_number"):
+                        issues.append("Missing survey number")
+                    if not prop.get("village"):
+                        issues.append("Missing property village")
+                    if not prop.get("extent"):
+                        issues.append("Missing property extent")
+                    bounds = prop.get("boundaries", {})
+                    if isinstance(bounds, dict):
+                        missing_dirs = [d for d in ("north", "south", "east", "west")
+                                       if not bounds.get(d)]
+                        if missing_dirs:
+                            issues.append(f"Missing boundaries: {', '.join(missing_dirs)}")
+
+                # Ownership history depth
+                oh = sd.get("ownership_history", [])
+                if not oh or (isinstance(oh, list) and len(oh) == 0):
+                    issues.append("No ownership history — recitals may not have been extracted")
+
+                # Witnesses
+                witnesses = sd.get("witnesses", [])
+                if not witnesses or (isinstance(witnesses, list) and len(witnesses) == 0):
+                    issues.append("No witnesses extracted")
+
+                if issues:
+                    logger.warning(
+                        f"[{filename}] Sale Deed extraction gaps: {'; '.join(issues)}"
+                    )
+                    yield _update(session, "data_extraction",
+                                 f"⚠ {filename}: {len(issues)} extraction gap(s) found", {
+                                     "type": "extraction_completeness",
+                                     "doc_type": "SALE_DEED",
+                                     "issues": issues,
+                                 })
+                else:
+                    yield _update(session, "data_extraction",
+                                 f"{filename}: Sale Deed extraction complete — all key fields present")
+
         # ═══════════════════════════════════════════
         # STAGE 3.5a: KNOWLEDGE — Memory & Document Knowledge Base
         # ═══════════════════════════════════════════
@@ -582,6 +780,31 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                     if risk_count:
                         yield _update(session, "knowledge",
                                      f"Memory: {filename} → {risk_count} risk facts stored")
+
+                # Store risk classification for Sale Deed documents
+                if doc_type == "SALE_DEED" and isinstance(content, dict):
+                    sd_risk_count = memory_bank.ingest_risk_classification_sale_deed(filename, content)
+                    if sd_risk_count:
+                        yield _update(session, "knowledge",
+                                     f"Memory: {filename} → {sd_risk_count} Sale Deed risk facts stored")
+
+                # Harvest risk insights from extraction CoT thinking
+                # The model often notes concerns during extraction that
+                # don't map to any schema field — capture them as risk facts
+                if isinstance(content, dict):
+                    thinking_text = content.get("_thinking", "")
+                    if thinking_text and len(thinking_text) > 100:
+                        cot_risks = _extract_cot_risk_insights(thinking_text)
+                        for insight in cot_risks:
+                            memory_bank._add_fact(
+                                "risk", "extraction_cot_insight",
+                                insight, filename, doc_type,
+                                confidence=0.7,
+                                context="Identified during extraction chain-of-thought reasoning",
+                            )
+                        if cot_risks:
+                            yield _update(session, "knowledge",
+                                         f"Memory: {filename} → {len(cot_risks)} risk insights from CoT")
 
         # Run conflict detection
         conflicts = memory_bank.detect_conflicts()
@@ -741,6 +964,7 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                         filename=filename,
                         pages=rag_pages,
                         embed_fn=get_embeddings,
+                        doc_type=doc_type,
                     )
                     total_chunks += chunk_count
                     source = "structured output" if (extraction_data and isinstance(extraction_data, dict)) else "text"
@@ -772,6 +996,27 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                         total_chunks += txn_count
                         yield _update(session, "knowledge",
                                      f"Knowledge: {filename} → {txn_count} transaction chunks indexed")
+
+                    # ── Section-aware RAG for Sale Deed documents ──────
+                    # Index key Sale Deed sections as separate semantic chunks
+                    # so verification can retrieve specific sections (parties,
+                    # property, financials, ownership history) independently.
+                    if (
+                        doc_type == "SALE_DEED"
+                        and extraction_data
+                        and isinstance(extraction_data, dict)
+                    ):
+                        sd_sections = _build_sale_deed_rag_sections(filename, extraction_data)
+                        if sd_sections:
+                            sd_chunk_count = await rag_store.index_document(
+                                filename=f"{filename}::sections",
+                                pages=sd_sections,
+                                embed_fn=get_embeddings,
+                                doc_type="SALE_DEED",
+                            )
+                            total_chunks += sd_chunk_count
+                            yield _update(session, "knowledge",
+                                         f"Knowledge: {filename} → {sd_chunk_count} section chunks indexed")
 
                 # Register with tools module so search_documents can use it
                 set_rag_store(rag_store, embed_fn=get_embeddings)
@@ -838,7 +1083,7 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
             relevant_docs = []
             for dtype in needed_types:
                 for fname, content in docs_by_type.get(dtype, []):
-                    json_str = json.dumps(content, separators=(",", ":"),
+                    json_str = json.dumps(content, indent=2,
                                           default=str, ensure_ascii=False)
                     relevant_docs.append(f"═══ {dtype}: {fname} ═══\n{json_str}")
 
@@ -1025,6 +1270,10 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
             if gid not in group_inputs:
                 return  # Already skipped above
 
+            # Set active doc type for profile-aware RAG queries during this group
+            primary_doc_type = group.get("needs", [""])[0] if group.get("needs") else ""
+            set_active_doc_type(primary_doc_type)
+
             doc_input_with_mb, system_prompt, group_tools, rag_hint, rag_evidence_block, effective_check_count = group_inputs[gid]
 
             # Per-group progress callback that writes live to the session
@@ -1076,6 +1325,7 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                         on_progress=_group_progress,
                         think=True,
                         tools=group_tools,
+                        max_tokens=49152,  # 48K budget — verification produces structured JSON (token-efficient)
                     )
 
                 # Handle graceful degradation from LLM client
@@ -1120,6 +1370,19 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                     group_results[gid].setdefault("checks", []).extend(na_stubs)
 
                 checks = group_results[gid].get("checks", [])
+
+                # ── Store verification CoT risk insights in memory bank ──
+                # The model often identifies risk patterns during verification
+                # reasoning that don't map to any check — capture them.
+                if result.get("_thinking"):
+                    cot_risks = _extract_cot_risk_insights(result["_thinking"])
+                    for insight in cot_risks:
+                        memory_bank._add_fact(
+                            "risk", "verification_cot_insight", insight,
+                            f"group{gid}", "VERIFICATION", confidence=0.75,
+                            context=f"Identified during {gname} verification",
+                        )
+
                 thinking = result.pop("_thinking", "")
 
                 passed = sum(1 for c in checks if c.get("status") == "PASS")
@@ -1167,8 +1430,9 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                             temperature=0.1,
                             task_label=f"Verification Pass {gid}: {gname} (retry)",
                             on_progress=_group_progress,
-                            think=False,
-                            tools=None,  # no tools to simplify
+                            think=True,   # keep CoT depth on retry — complex groups need reasoning
+                            tools=None,   # no tools to simplify (tool failure is the common retry trigger)
+                            max_tokens=49152,
                         )
                 except Exception as retry_err:
                     logger.error(f"Verification group {gid} retry also failed: {retry_err}")
@@ -1445,7 +1709,7 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
         report_input = json.dumps({
             "documents": session.documents,
             "verification_result": session.verification_result,
-        }, separators=(",", ":"), default=str, ensure_ascii=False)
+        }, indent=2, default=str, ensure_ascii=False)
 
         narrative_payload = (
             f"Generate a comprehensive due diligence report.\n\n"
@@ -1460,11 +1724,19 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                 from app.pipeline.rag_store import RAGStore as _RAGStore
 
                 narrative_queries = ["property ownership chain of title"]
+                # Add queries for all flagged checks (not just first 4)
                 for check in all_checks:
                     if check.get("status") in ("FAIL", "WARNING"):
                         q = check.get("rule_name", "") + " " + check.get("explanation", "")[:100]
                         narrative_queries.append(q.strip())
-                narrative_queries = narrative_queries[:5]
+                # Add broad coverage queries for key legal topics
+                narrative_queries.extend([
+                    "encumbrance mortgage lien discharge",
+                    "stamp duty registration fee consideration",
+                    "boundaries survey extent area",
+                    "seller buyer executant claimant",
+                ])
+                narrative_queries = narrative_queries[:10]
 
                 narrative_embeddings = await get_embeddings(narrative_queries)
                 narrative_chunks = []
@@ -1472,21 +1744,21 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                 for nq_text, nq_emb in zip(narrative_queries, narrative_embeddings):
                     if not nq_emb or all(v == 0.0 for v in nq_emb[:5]):
                         continue
-                    chunks = rag_store.query_sync(nq_emb, n_results=3, query_text=nq_text)
+                    chunks = rag_store.query_sync(nq_emb, n_results=5, query_text=nq_text)
                     for chunk in chunks:
                         cid = f"{chunk.filename}_p{chunk.page_number}_c{chunk.chunk_index}"
                         if cid not in seen_ids:
                             seen_ids.add(cid)
                             narrative_chunks.append(chunk)
                 narrative_chunks.sort(key=lambda c: c.score)
-                narrative_evidence = _RAGStore.format_evidence(narrative_chunks[:12], max_chars=8000)
+                narrative_evidence = _RAGStore.format_evidence(narrative_chunks[:25], max_chars=20000)
                 if narrative_evidence:
                     narrative_payload += (
                         f"\n\n═══ SOURCE DOCUMENT PASSAGES ═══\n"
                         f"Use these original document passages to cite specific text in your report.\n\n"
                         f"{narrative_evidence}"
                     )
-                    logger.info(f"Narrative: Pre-injected {len(narrative_chunks[:12])} RAG chunks")
+                    logger.info(f"Narrative: Pre-injected {len(narrative_chunks[:25])} RAG chunks")
             except Exception as rag_err:
                 logger.warning(f"Narrative RAG pre-fetch failed: {rag_err}")
 
@@ -1519,7 +1791,8 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                     task_label="Narrative Report Generation",
                     on_progress=_llm_progress,
                     think=True,
-                    max_tokens=8192,
+                    max_tokens=65536,  # 64K budget — narrative is user-facing free text, needs more room
+                    repeat_penalty=1.05,  # Low penalty — legal text naturally repeats terms
                 )
             except Exception as e:
                 logger.error(f"Narrative generation failed: {e}")
@@ -1562,6 +1835,33 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
                                  "amendments_applied": applied,
                                  "notes": reflection_notes[:200],
                              })
+
+                # ── Iterative second pass — amendments can introduce new contradictions ──
+                # Only runs when amendments were actually applied (happy-path cost = zero)
+                if applied > 0:
+                    try:
+                        yield _update(session, "verification",
+                                     f"Self-reflection round 2: checking {applied} amended check(s) for new contradictions...")
+                        round2_result = await run_self_reflection(
+                            all_checks, on_progress=_llm_progress,
+                            tools=OLLAMA_TOOLS if rag_store else None,
+                        )
+                        round2_amendments = round2_result.get("amendments", [])
+                        if round2_amendments:
+                            r2_applied = apply_amendments(all_checks, round2_amendments)
+                            if r2_applied:
+                                yield _update(session, "verification",
+                                             f"Self-reflection round 2: {r2_applied} additional amendment(s) applied", {
+                                                 "type": "reflection_done",
+                                                 "round": 2,
+                                                 "amendments_applied": r2_applied,
+                                             })
+                        else:
+                            yield _update(session, "verification",
+                                         "Self-reflection round 2: no further contradictions found.")
+                    except Exception as r2_err:
+                        logger.warning(f"Self-reflection round 2 failed: {r2_err}")
+
                 # Recompute score after amendments
                 computed_deduction = _compute_score_deductions(all_checks)
                 session.risk_score = max(0, min(100, 100 - computed_deduction))
@@ -1630,6 +1930,154 @@ async def run_analysis(file_paths: list[Path], session_id: str | None = None) ->
 
 
 # ── RAG helper: flatten vision extraction output into indexable pages ──
+
+def _build_sale_deed_rag_sections(filename: str, data: dict) -> list[dict]:
+    """Build section-aware semantic chunks for Sale Deed RAG indexing.
+
+    Each Sale Deed section (parties, property, financials, ownership history,
+    conditions, witnesses) is indexed as a separate chunk so verification
+    prompts can retrieve specific sections independently.
+
+    Returns:
+        List of ``{"page_number": N, "text": "..."}`` dicts.
+    """
+    pages: list[dict] = []
+    page_num = 0
+    header = f"[SALE_DEED] {filename}"
+
+    def _add(lines: list[str]) -> None:
+        nonlocal page_num
+        text = "\n".join(lines).strip()
+        if not text or len(text) < 20:
+            return
+        page_num += 1
+        pages.append({"page_number": page_num, "text": text})
+
+    # Section 1: Transaction identity
+    identity = [header, "--- Sale Deed Identity ---"]
+    for key in ("document_number", "registration_date", "execution_date", "sro"):
+        val = data.get(key)
+        if val:
+            identity.append(f"{key.replace('_', ' ').title()}: {val}")
+    reg = data.get("registration_details", {})
+    if isinstance(reg, dict):
+        for k, v in reg.items():
+            if v:
+                identity.append(f"{k.replace('_', ' ').title()}: {v}")
+    _add(identity)
+
+    # Section 2: Parties (sellers + buyers)
+    party_lines = [header, "--- Parties ---"]
+    for role in ("seller", "buyer"):
+        parties = data.get(role, [])
+        if isinstance(parties, list):
+            for i, p in enumerate(parties):
+                if isinstance(p, dict):
+                    parts = [f"{role.title()} {i+1}: {p.get('name', '?')}"]
+                    for field in ("father_name", "age", "address", "pan", "aadhaar", "share_percentage"):
+                        v = p.get(field)
+                        if v:
+                            parts.append(f"  {field.replace('_', ' ').title()}: {v}")
+                    party_lines.extend(parts)
+                elif isinstance(p, str):
+                    party_lines.append(f"{role.title()} {i+1}: {p}")
+    _add(party_lines)
+
+    # Section 3: Property details
+    prop = data.get("property", {})
+    prop_lines = [header, "--- Property Schedule ---"]
+    if isinstance(prop, dict):
+        for key in ("survey_number", "village", "taluk", "district", "extent",
+                     "property_type", "land_classification", "plot_number",
+                     "door_number", "assessment_number"):
+            val = prop.get(key)
+            if val:
+                prop_lines.append(f"{key.replace('_', ' ').title()}: {val}")
+        bounds = prop.get("boundaries", {})
+        if isinstance(bounds, dict):
+            for d in ("north", "south", "east", "west"):
+                v = bounds.get(d)
+                if v:
+                    prop_lines.append(f"Boundary {d.title()}: {v}")
+    pd = data.get("property_description", "")
+    if pd:
+        prop_lines.append(f"Property Description: {pd[:500]}")
+    _add(prop_lines)
+
+    # Section 4: Financials
+    fin = data.get("financials", {})
+    fin_lines = [header, "--- Financials ---"]
+    if isinstance(fin, dict):
+        for key in ("consideration_amount", "guideline_value", "stamp_duty", "registration_fee"):
+            val = fin.get(key)
+            if val:
+                fin_lines.append(f"{key.replace('_', ' ').title()}: ₹{val:,}" if isinstance(val, (int, float)) else f"{key}: {val}")
+    sp = data.get("stamp_paper", {})
+    if isinstance(sp, dict):
+        for key in ("sheet_count", "denomination_per_sheet", "total_stamp_value", "vendor_name"):
+            val = sp.get(key)
+            if val:
+                fin_lines.append(f"Stamp Paper {key.replace('_', ' ').title()}: {val}")
+    pm = data.get("payment_mode")
+    if pm:
+        fin_lines.append(f"Payment Mode: {pm}")
+    _add(fin_lines)
+
+    # Section 5: Ownership history
+    oh = data.get("ownership_history", [])
+    if isinstance(oh, list) and oh:
+        oh_lines = [header, "--- Ownership History (Recitals) ---"]
+        for i, entry in enumerate(oh):
+            if isinstance(entry, dict):
+                owner = entry.get("owner", "?")
+                af = entry.get("acquired_from", "?")
+                mode = entry.get("acquisition_mode", "?")
+                doc = entry.get("document_number", "")
+                date = entry.get("document_date", "")
+                line = f"{i+1}. {af} → {owner} ({mode})"
+                if doc:
+                    line += f" [Doc {doc}"
+                    if date:
+                        line += f", {date}"
+                    line += "]"
+                rmk = entry.get("remarks")
+                if rmk:
+                    line += f" — {rmk}"
+                oh_lines.append(line)
+        _add(oh_lines)
+
+    # Section 6: Special conditions + encumbrance declaration
+    cond_lines = [header, "--- Conditions & Encumbrances ---"]
+    enc = data.get("encumbrance_declaration")
+    if enc:
+        cond_lines.append(f"Encumbrance Declaration: {enc}")
+    sc = data.get("special_conditions", [])
+    if isinstance(sc, list):
+        for i, c in enumerate(sc[:10]):
+            if isinstance(c, str) and c.strip():
+                cond_lines.append(f"Condition {i+1}: {c}")
+    poa = data.get("power_of_attorney")
+    if poa:
+        cond_lines.append(f"Power of Attorney: {poa}")
+    _add(cond_lines)
+
+    # Section 7: Witnesses
+    witnesses = data.get("witnesses", [])
+    if isinstance(witnesses, list) and witnesses:
+        w_lines = [header, "--- Witnesses ---"]
+        for i, w in enumerate(witnesses):
+            if isinstance(w, dict):
+                w_lines.append(f"Witness {i+1}: {w.get('name', '?')}")
+                for field in ("father_name", "age", "address"):
+                    v = w.get(field)
+                    if v:
+                        w_lines.append(f"  {field.replace('_', ' ').title()}: {v}")
+            elif isinstance(w, str):
+                w_lines.append(f"Witness {i+1}: {w}")
+        _add(w_lines)
+
+    return pages
+
 
 def _flatten_extraction_for_rag(data: dict, doc_type: str, filename: str) -> list[dict]:
     """Convert structured extraction output into page-like dicts for RAG indexing.
@@ -1963,29 +2411,6 @@ def _update(session: AnalysisSession, stage: str, message: str, detail: dict | N
     return result
 
 
-def _build_consolidated_summary(extracted_data: dict) -> str:
-    """Build a text summary of all extracted data (legacy fallback).
-    
-    Prefer build_compact_summary() from summarizer for production use.
-    """
-    parts = []
-    for filename, data in extracted_data.items():
-        doc_type = data.get("document_type", "UNKNOWN")
-        content = data.get("data")
-        if content:
-            parts.append(
-                f"═══ DOCUMENT: {filename} (Type: {doc_type}) ═══\n"
-                f"{json.dumps(content, separators=(',', ':'), default=str, ensure_ascii=False)}"
-            )
-        else:
-            error = data.get("error", "No data extracted")
-            parts.append(
-                f"═══ DOCUMENT: {filename} (Type: {doc_type}) ═══\n"
-                f"[Extraction failed: {error}]"
-            )
-    return "\n\n".join(parts)
-
-
 # ═══════════════════════════════════════════════════
 # CHECK DEDUPLICATION — prevent double-counting
 # ═══════════════════════════════════════════════════
@@ -2298,6 +2723,9 @@ def _confidence_band(score: float) -> str:
     return "VERY_LOW"
 
 
+_FIELD_CONFIDENCE_SCORES = {"high": 1.0, "medium": 0.7, "low": 0.4}
+
+
 def _annotate_check_confidence(
     checks: list[dict],
     extracted_data: dict,
@@ -2305,9 +2733,10 @@ def _annotate_check_confidence(
 ) -> None:
     """Add ``data_confidence`` and ``data_confidence_score`` to each check.
 
-    Computes the minimum extraction confidence across all documents whose
-    type appears in *needed_types*.  This indicates how much trust to place
-    in the underlying extracted data that fed the verification check.
+    Aggregates from ``_field_confidence`` (per-field confidence dict produced
+    by every extraction schema) to compute the minimum confidence across all
+    documents whose type appears in *needed_types*.  A single low-confidence
+    field casts doubt on the whole document's extraction quality.
 
     Modifies *checks* in-place.
     """
@@ -2320,11 +2749,16 @@ def _annotate_check_confidence(
         data = fdata.get("data")
         if not isinstance(data, dict):
             continue
-        score = data.get("_confidence_score")
-        if score is not None:
-            has_any = True
-            if score < min_score:
-                min_score = score
+        # Aggregate from _field_confidence: {"field1": "high", "field2": "low", ...}
+        field_conf = data.get("_field_confidence")
+        if isinstance(field_conf, dict) and field_conf:
+            for _field, band_str in field_conf.items():
+                score = _FIELD_CONFIDENCE_SCORES.get(
+                    str(band_str).lower(), 0.7  # default to medium if unknown band
+                )
+                has_any = True
+                if score < min_score:
+                    min_score = score
 
     if not has_any:
         return  # No confidence info — don't annotate

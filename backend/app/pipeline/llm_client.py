@@ -49,10 +49,9 @@ async def _noop_cb(stage: str, message: str, details: dict) -> None:
     pass
 
 # Token budget for finalize/revalidation passes.  These produce only a JSON
-# result object (no chain-of-thought), so 16K tokens is more than enough.
-# Using the full context window here causes prompt+predict to overshoot num_ctx,
-# leaving zero tokens for output → Ollama returns empty content.
-FINALIZE_PREDICT_BUDGET = 16384
+# result object (no chain-of-thought).  Raised to 32K to handle larger check
+# sets produced by the 128K context window + 5 tool-call rounds.
+FINALIZE_PREDICT_BUDGET = 32768
 
 
 def _build_finalize_hint(schema: dict | None) -> str:
@@ -104,6 +103,103 @@ def _build_finalize_hint(schema: dict | None) -> str:
     return "{" + ", ".join(parts) + "}"
 
 
+async def _stream_ollama_chat(
+    client: httpx.AsyncClient,
+    body: dict,
+    cb: LLMProgressCallback,
+    label: str,
+) -> dict:
+    """Stream an Ollama /api/chat request, emitting thinking chunks in real-time.
+
+    Ollama streaming returns NDJSON lines:
+      {"message": {"role": "assistant", "content": "...", "thinking": "..."}, "done": false}
+      ...
+      {"message": {...}, "done": true, "eval_count": N, "total_duration": N, ...}
+
+    This function accumulates content/thinking, fires on_progress callbacks
+    for thinking chunks as they arrive, and returns a dict identical in
+    structure to what ``response.json()`` returns in non-streaming mode.
+    """
+    body_stream = {**body, "stream": True}
+    accumulated_content = ""
+    accumulated_thinking = ""
+    tool_calls = None
+    final_metrics: dict = {}
+    thinking_chunk_buf = ""
+    THINKING_FLUSH_CHARS = 500   # flush every ~500 chars (was 120)
+    THINKING_MIN_INTERVAL = 2.0  # minimum seconds between callback emissions
+    _last_thinking_emit = 0.0
+
+    async with client.stream("POST", f"{OLLAMA_BASE_URL}/api/chat", json=body_stream) as resp:
+        resp.raise_for_status()
+        async for raw_line in resp.aiter_lines():
+            if not raw_line.strip():
+                continue
+            try:
+                chunk = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+
+            msg = chunk.get("message", {})
+
+            # Accumulate thinking tokens and emit in throttled batches
+            think_delta = msg.get("thinking", "")
+            if think_delta:
+                accumulated_thinking += think_delta
+                thinking_chunk_buf += think_delta
+                _now = time.time()
+                if (len(thinking_chunk_buf) >= THINKING_FLUSH_CHARS
+                        and (_now - _last_thinking_emit) >= THINKING_MIN_INTERVAL):
+                    await cb("llm_thinking_chunk", f"{label} — thinking...", {
+                        "type": "llm_thinking_chunk",
+                        "task": label,
+                        "chunk": thinking_chunk_buf,
+                        "total_thinking_chars": len(accumulated_thinking),
+                    })
+                    thinking_chunk_buf = ""
+                    _last_thinking_emit = _now
+
+            # Accumulate content tokens
+            content_delta = msg.get("content", "")
+            if content_delta:
+                accumulated_content += content_delta
+
+            # Tool calls appear in the final chunk
+            if msg.get("tool_calls"):
+                tool_calls = msg["tool_calls"]
+
+            # Final chunk — capture Ollama metrics
+            if chunk.get("done"):
+                final_metrics = {
+                    k: chunk[k] for k in (
+                        "eval_count", "prompt_eval_count",
+                        "total_duration", "eval_duration",
+                    ) if k in chunk
+                }
+
+    # Flush any remaining thinking buffer
+    if thinking_chunk_buf:
+        await cb("llm_thinking_chunk", f"{label} — thinking...", {
+            "type": "llm_thinking_chunk",
+            "task": label,
+            "chunk": thinking_chunk_buf,
+            "total_thinking_chars": len(accumulated_thinking),
+        })
+
+    # Build a result dict matching the non-streaming response shape
+    result = {
+        "message": {
+            "role": "assistant",
+            "content": accumulated_content,
+            "thinking": accumulated_thinking,
+        },
+        **final_metrics,
+    }
+    if tool_calls:
+        result["message"]["tool_calls"] = tool_calls
+    return result
+
+
 async def call_llm(
     prompt: str,
     system_prompt: str = "",
@@ -114,6 +210,8 @@ async def call_llm(
     think: bool = False,
     tools: list[dict] | None = None,
     max_tokens: int | None = None,
+    repeat_penalty: float | None = None,
+    min_p: float | None = None,
 ) -> dict | str:
     """Call local Ollama model and return response.
     
@@ -127,6 +225,8 @@ async def call_llm(
         on_progress: Async callback for progress updates
         think: If True, enable chain-of-thought (model returns thinking + content)
         tools: List of Ollama tool definitions for function calling
+        repeat_penalty: Override repeat penalty (default 1.3 for extraction, use ~1.05 for narrative)
+        min_p: Minimum probability filter (0.0-1.0). Cuts low-probability tokens.
     
     Returns:
         Parsed JSON dict (with optional _thinking key) or raw string
@@ -139,7 +239,7 @@ async def call_llm(
         # When thinking is disabled, explicitly instruct the model not to reason
         # (some models ignore the API think:false flag and think anyway)
         if not think:
-            sp += "\n\nIMPORTANT: Do NOT include any chain-of-thought, reasoning, or analysis. Output ONLY the requested content directly."
+            sp += "\n\nIMPORTANT: Do NOT include any chain-of-thought, reasoning, or analysis. Output ONLY the requested content directly.\n/no_think"
         messages.append({"role": "system", "content": sp})
     messages.append({"role": "user", "content": prompt})
 
@@ -257,12 +357,18 @@ async def call_llm(
                     "temperature": temperature,
                     "num_predict": predict_budget,
                     "num_ctx": LLM_CONTEXT_WINDOW,
-                    "repeat_penalty": 1.3,     # Prevent repetition loops (e.g. "பட்டா" ×200)
+                    "repeat_penalty": repeat_penalty if repeat_penalty is not None else 1.3,
                     "repeat_last_n": 256,       # Look-back window for repeat penalty
+                    "min_p": min_p if min_p is not None else 0.05,  # Filter low-probability tokens
                 },
                 "format": format_param,
                 "think": use_think,  # Always explicit — prevents model-level default thinking
             }
+
+            # Set num_keep to protect system prompt from eviction
+            if system_prompt:
+                # Rough estimate: 1 token ≈ 4 chars
+                body["options"]["num_keep"] = max(len(system_prompt) // 4, 256)
 
             # Tool calling
             if use_tools:
@@ -271,13 +377,9 @@ async def call_llm(
             # Per-call client — each concurrent task gets its own client
             # This avoids "client has been closed" errors with shared clients
             async with httpx.AsyncClient(timeout=LLM_TIMEOUT) as client:
-                response = await client.post(
-                    f"{OLLAMA_BASE_URL}/api/chat",
-                    json=body,
-                )
-                response.raise_for_status()
+                # ── Primary call uses streaming for real-time CoT preview ──
+                result = await _stream_ollama_chat(client, body, cb, label)
                 elapsed = time.time() - t0
-                result = response.json()
                 message = result["message"]
                 content = message.get("content", "")
 
@@ -297,6 +399,7 @@ async def call_llm(
                 tools_used = set()
                 if tool_calls and use_tools:
                     from app.pipeline.tools import execute_tool
+                    import contextvars
                     
                     # Append assistant message with tool_calls
                     messages.append(message)
@@ -304,45 +407,69 @@ async def call_llm(
                     tool_round = 0
                     while tool_calls and tool_round < LLM_TOOL_CALL_MAX_ROUNDS:
                         tool_round += 1
-                        for tc in tool_calls:
-                            fn = tc.get("function", {})
+
+                        # ── Parallel tool execution ──
+                        # Qwen3 natively returns multiple tool calls per round.
+                        # Execute them concurrently via asyncio.gather() instead
+                        # of sequentially, cutting wall-clock time for multi-tool rounds.
+                        async def _exec_one_tool(tc_item, _round=tool_round):
+                            fn = tc_item.get("function", {})
                             fn_name = fn.get("name", "unknown")
                             fn_args = fn.get("arguments", {})
-                            tool_call_count += 1
-                            tools_used.add(fn_name)
-                            
+
                             await cb("llm_tool_call", f"{label} — Calling {fn_name}()", {
                                 "type": "llm_tool_call",
                                 "task": label,
                                 "tool_name": fn_name,
                                 "tool_args": fn_args,
-                                "round": tool_round,
+                                "round": _round,
                             })
-                            
+
                             # Run sync tool executor in a thread so the event
                             # loop stays free — needed for search_documents()
                             # which calls async embedding via asyncio.run().
                             # Use copy_context() so ContextVar values (rag_store,
                             # embed_fn, memory_bank) are visible in the thread.
-                            import contextvars
                             ctx = contextvars.copy_context()
                             tool_result = await asyncio.get_running_loop().run_in_executor(
                                 None, ctx.run, execute_tool, fn_name, fn_args
                             )
-                            
+
                             await cb("llm_tool_result", f"{label} — {fn_name} returned", {
                                 "type": "llm_tool_result",
                                 "task": label,
                                 "tool_name": fn_name,
                                 "result_preview": tool_result[:200],
-                                "round": tool_round,
+                                "round": _round,
                             })
-                            
-                            # Send tool result back to model
-                            messages.append({
-                                "role": "tool",
-                                "content": tool_result,
-                            })
+                            return fn_name, tool_result
+
+                        # Track metadata
+                        for tc in tool_calls:
+                            fn = tc.get("function", {})
+                            tool_call_count += 1
+                            tools_used.add(fn.get("name", "unknown"))
+
+                        # Fire all tool calls concurrently
+                        results_list = await asyncio.gather(
+                            *[_exec_one_tool(tc) for tc in tool_calls],
+                            return_exceptions=True,
+                        )
+
+                        # Append results to message history
+                        for res in results_list:
+                            if isinstance(res, Exception):
+                                logger.warning(f"[{label}] Parallel tool call failed: {res}")
+                                messages.append({
+                                    "role": "tool",
+                                    "content": f"Tool call failed: {res}",
+                                })
+                            else:
+                                _fn_name, _tool_result = res
+                                messages.append({
+                                    "role": "tool",
+                                    "content": _tool_result,
+                                })
                         
                         # Re-call the model with tool results
                         body["messages"] = messages

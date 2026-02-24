@@ -37,5 +37,5 @@ class LegalHeirExtractor(BaseExtractor):
             expect_json=EXTRACT_LEGAL_HEIR_SCHEMA,
             task_label=f"{name} extraction ({len(full_text):,} chars)",
             on_progress=on_progress,
-            think=True,
+            think=False,  # Simple certificate lookup — no CoT needed
         )

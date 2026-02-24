@@ -66,6 +66,7 @@ body {
 @page { size: A4; margin: 0; }
 @media print {
   body { background: #fff; padding: 0; gap: 0; }
+  .doc { box-shadow: none; }
 }
 
 /* --- DOCUMENT SHELL --- */
@@ -163,7 +164,7 @@ body {
    BODY (flowing content area)
 ====================================== */
 .body {
-  padding: 20px var(--mg) 24px;
+  padding: 20px var(--mg) 52px;
   display: flex;
   flex-direction: column;
   gap: 18px;
@@ -342,15 +343,40 @@ body {
 .disclaimer strong { color: var(--ink); font-weight: 600; }
 
 /* =======================================
+   NARRATIVE REPORT
+======================================= */
+.narrative-body { font-size: var(--t-sm); color: var(--ink-80); line-height: 1.85; }
+.narrative-body h2 { font-size: var(--t-lg); font-weight: 700; color: var(--ink); margin: 1.4em 0 0.4em; padding-bottom: 0.2em; border-bottom: 1px solid var(--ink-08); }
+.narrative-body h3 { font-size: var(--t-base); font-weight: 600; color: var(--ink); margin: 1.1em 0 0.3em; }
+.narrative-body h4 { font-size: var(--t-sm); font-weight: 600; color: var(--ink-50); margin: 0.9em 0 0.2em; text-transform: uppercase; letter-spacing: 0.06em; }
+.narrative-body p { margin: 0.4em 0; }
+.narrative-body strong { color: var(--ink); font-weight: 600; }
+.narrative-body ul, .narrative-body ol { margin: 0.4em 0 0.6em; padding-left: 1.4em; }
+.narrative-body li { margin: 0.15em 0; }
+.narrative-body table { width: 100%; border-collapse: collapse; margin: 0.6em 0; font-size: var(--t-xs); }
+.narrative-body th { background: var(--ink-04); font-weight: 600; text-align: left; padding: 4px 8px; border: 1px solid var(--ink-08); color: var(--ink); font-size: var(--t-2xs); text-transform: uppercase; letter-spacing: 0.06em; }
+.narrative-body td { padding: 3px 8px; border: 1px solid var(--ink-08); vertical-align: top; }
+.narrative-body tr:nth-child(even) td { background: var(--ink-02); }
+.narrative-body blockquote { margin: 0.5em 0; padding: 0.3em 0.8em; border-left: 2px solid var(--crimson); background: var(--ink-02); color: var(--ink-80); font-style: italic; }
+.narrative-body blockquote p { margin: 0.2em 0; }
+.narrative-body hr { border: none; border-top: 1px solid var(--ink-08); margin: 1em 0; }
+.narrative-body code { background: var(--ink-04); padding: 1px 4px; border-radius: 2px; font-size: 0.88em; font-family: 'JetBrains Mono', monospace; }
+
+/* =======================================
    PAGE FOOTER
 ======================================= */
 .page-footer {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  width: var(--pw);
   background: var(--ink);
-  padding: 10px var(--mg);
+  padding: 8px var(--mg);
   display: grid;
   grid-template-columns: auto 1fr auto;
   gap: 24px;
   align-items: center;
+  z-index: 100;
 }
 .pf-brand { font-family: 'Syne', 'Segoe UI', 'Helvetica Neue', sans-serif; font-size: var(--t-lg); font-weight: 800; color: rgba(255,255,255,0.5); letter-spacing: -0.01em; }
 .pf-sub { font-size: var(--t-2xs); color: rgba(255,255,255,0.18); margin-top: 2px; letter-spacing: 0.06em; }
@@ -424,7 +450,7 @@ body {
       </div>
     </div>
     <div class="sb-bottom">
-      <div class="sb-summary-text">{{ executive_summary | default('Analysis complete. Review individual sections below for detailed findings.', true) | truncate(400, True, '...') }}</div>
+      <div class="sb-summary-text">{{ executive_summary | default('Analysis complete. Review individual sections below for detailed findings.', true) | truncate(1200, True, '...') }}</div>
     </div>
   </div>
 
@@ -491,28 +517,6 @@ body {
         </div>
         {% endif %}
       </div>
-
-      {# Documents Analysed table #}
-      {% if documents %}
-      <table class="docs-tbl" style="margin-top:10px;">
-        <thead>
-          <tr>
-            <th style="width:5%">#</th>
-            <th>Filename</th>
-            <th>Document Type</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for doc in documents %}
-          <tr>
-            <td class="mono">{{ loop.index }}</td>
-            <td>{{ doc.filename | default('--') }}</td>
-            <td><span class="badge other">{{ doc.classification.doc_type | default(doc.doc_type | default('--')) }}</span></td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-      {% endif %}
     </div>
 
     {# ====== S02 MISSING DOCUMENTS ====== #}
@@ -529,27 +533,37 @@ body {
     </div>
     {% endif %}
 
-    {# ====== S03 VERIFICATION SUMMARY ====== #}
+    {# ====== S03 VERIFICATION SUMMARY (issues only) ====== #}
     <div>
       <div class="sh">
         <span class="sh-num">-- {% if missing_documents %}03{% else %}02{% endif %}</span>
         <span class="sh-title">Verification Summary</span>
         <div class="sh-fill"></div>
-        <span class="sh-count">{{ total_pass }} Passed · {{ total_fail }} Failed · {{ total_warn }} Advisory</span>
+        <span class="sh-count">{{ total_pass }}/{{ total_checks }} Passed · {{ total_fail }} Failed · {{ total_warn }} Advisory</span>
       </div>
-      <div class="checks-grid">
-        {% for check in all_checks %}
-        {% set st = check.status | upper %}
-        {% set cls = 'pass' if st == 'PASS' else 'fail' if st == 'FAIL' else 'warn' if st == 'WARNING' else 'na' %}
-        <div class="ck {{ cls }}">
-          <div class="ck-icon {{ cls }}">{{ 'P' if st == 'PASS' else 'F' if st == 'FAIL' else '!' if st == 'WARNING' else '--' }}</div>
-          <div class="ck-body">
-            <div class="ck-title">{{ check.rule_name | default(check.check_name, true) | default('Check', true) }}</div>
-            <div class="ck-desc">{{ check.explanation | truncate(140, True, '...') }}</div>
-          </div>
+      {% if total_fail == 0 and total_warn == 0 %}
+      <div class="flag-card green">
+        <div class="flag-ico">P</div>
+        <div class="flag-content">
+          <div class="flag-title">All {{ total_pass }} Verification Checks Passed</div>
+          <div class="flag-body">No blocking issues or advisories were identified in the uploaded documents.</div>
         </div>
-        {% endfor %}
       </div>
+      {% else %}
+      {% for check in all_checks if check.status | upper in ('FAIL', 'WARNING') %}
+      {% set st = check.status | upper %}
+      <div class="flag-card {{ 'red' if st == 'FAIL' else 'amber' }}">
+        <div class="flag-ico">{{ 'F' if st == 'FAIL' else '!' }}</div>
+        <div class="flag-content">
+          <div class="flag-title">{{ check.rule_name | default(check.check_name, true) | default('Check', true) }}</div>
+          <div class="flag-body">{{ check.explanation | truncate(500, True, '...') }}</div>
+          {% if check.recommendation %}
+          <div class="flag-action">&gt; {{ check.recommendation }}</div>
+          {% endif %}
+        </div>
+      </div>
+      {% endfor %}
+      {% endif %}
     </div>
 
     {# ====== S04 CHAIN OF TITLE ====== #}
@@ -635,7 +649,7 @@ body {
         <div class="flag-ico">{{ 'F' if check.status == 'FAIL' else '!' }}</div>
         <div class="flag-content">
           <div class="flag-title">{{ check.rule_name | default(check.check_name, true) | default('Check', true) }}</div>
-          <div class="flag-body">{{ check.explanation | truncate(400, True, '...') }}</div>
+          <div class="flag-body">{{ check.explanation | truncate(800, True, '...') }}</div>
           {% if check.recommendation %}
           <div class="flag-action">&gt; {{ check.recommendation }}</div>
           {% endif %}
@@ -814,46 +828,6 @@ body {
     </div>
     {% endif %}
 
-    {# ====== S07 OWNER & PARTY VERIFICATION ====== #}
-    {% if identity_clusters %}
-    <div>
-      <div class="sh">
-        <span class="sh-num">-- {% if missing_documents %}07{% else %}06{% endif %}</span>
-        <span class="sh-title">Owner & Party Verification</span>
-        <div class="sh-fill"></div>
-        <span class="sh-count">{{ identity_clusters | length }} Identified</span>
-      </div>
-      <div class="party-tbl-wrap">
-        <table class="party-tbl">
-          <thead>
-            <tr>
-              <th style="width:30%">Canonical Name</th>
-              <th style="width:45%">Name Variants Found in Documents</th>
-              <th style="width:10%;text-align:center">Mentions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for cluster in identity_clusters[:12] %}
-            <tr>
-              <td>
-                <div class="pt-name">{{ cluster.consensus_name }}</div>
-                <div class="pt-role">{{ cluster.variants | length if cluster.variants else 0 }} variant{{ 's' if (cluster.variants | length if cluster.variants else 0) != 1 else '' }}</div>
-              </td>
-              <td>
-                <div class="pt-variants">{{ cluster.variants | join(' · ') if cluster.variants else '--' }}</div>
-              </td>
-              <td style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--ink);text-align:center;font-weight:500;">{{ cluster.mention_count | default('--') }}</td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-      {% if identity_clusters | length > 12 %}
-      <div class="note">+ {{ identity_clusters | length - 12 }} additional parties omitted.</div>
-      {% endif %}
-    </div>
-    {% endif %}
-
     {# ====== SIGNATURE BLOCK ====== #}
     <div class="sig-block">
       <div class="sig-head">Authorisation &amp; Client Acknowledgement -- Sign to confirm receipt and review of findings</div>
@@ -883,19 +857,19 @@ body {
 
   </div>{# /body #}
 
-  {# ======================== FOOTER ======================== #}
-  <div class="page-footer">
-    <div>
-      <div class="pf-brand">HataD</div>
-      <div class="pf-sub">Hypse Aero Private Limited · Incubated at KITS, Coimbatore</div>
-    </div>
-    <div class="pf-legal">This report is a preliminary due diligence instrument produced by automated analysis of verified government data. All findings must be independently verified by a licensed advocate prior to transaction. HataD accepts no liability for decisions made solely on this report.</div>
-    <div class="pf-right">
-      <div class="pf-ref">PCR-{{ session_id[:8] | upper }}<br>{{ generated_at }}</div>
-    </div>
-  </div>
-
 </div>{# /doc #}
+
+{# ======================== FOOTER (position:fixed = repeats every page) ======================== #}
+<div class="page-footer">
+  <div>
+    <div class="pf-brand">HataD</div>
+    <div class="pf-sub">Hypse Aero Private Limited · Incubated at KITS, Coimbatore</div>
+  </div>
+  <div class="pf-legal">This report is a preliminary due diligence instrument produced by automated analysis of verified government data. All findings must be independently verified by a licensed advocate prior to transaction. HataD accepts no liability for decisions made solely on this report.</div>
+  <div class="pf-right">
+    <div class="pf-ref">PCR-{{ session_id[:8] | upper }}<br>{{ generated_at }}</div>
+  </div>
+</div>
 
 </body>
 </html>

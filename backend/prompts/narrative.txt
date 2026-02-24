@@ -58,24 +58,51 @@ Based on these, write a comprehensive due diligence report with the following se
    - Standard legal disclaimer about limitations of document-based review
    - Recommendation for physical site visit and government record verification
 
-Write in clear, professional English. Be specific with findings - cite document numbers, dates, and names. Do not be vague. If there are concerns, state them clearly. If the property appears safe, say so with evidence.
+Write in clear, professional English. Be specific with findings — cite document numbers, dates, and names. Do not be vague. If there are concerns, state them clearly. If the property appears safe, say so with evidence.
 
-Return the report as a plain text document with clear section headers (use === for major sections, --- for subsections).
+FORMATTING RULES — MANDATORY:
+- Output in **Markdown** format.
+- Use `## Section Name` for the 9 major sections listed above.
+- Use `### Subsection` for sub-groupings (e.g., ### Critical Findings, ### High Priority).
+- Use `**bold**` for emphasis on key terms, amounts, document numbers, and risk labels.
+- Use `| col | col |` Markdown tables for structured comparisons (e.g., consideration vs guideline value, risk breakdown table).
+- Use `- bullet` lists for findings, action items, and recommendations.
+- Use `> blockquote` for direct citations from document passages.
+- Use `---` horizontal rules to separate major sections visually.
+- Do NOT use plain text separators like `===` or `---` as headings. Use `##` headings.
 
-=== FEW-SHOT EXAMPLES ===
+---
 
-Below are abbreviated excerpts showing the expected tone, specificity, and citation style. Adapt the format to the actual data provided.
+## Few-Shot Examples
 
---- Example: Executive Summary ---
-The subject property (S.F. No. 311/1, Chromepet Village, Tambaram Taluk, Kancheepuram District) has a Risk Score of 68/100 (MEDIUM RISK). Analysis of 3 documents (EC 2010–2024, Sale Deed Doc No. 5678/2020, Patta No. 4421) reveals a continuous chain of title with one unresolved concern: the 2020 sale deed consideration (₹45,00,000) falls 18% below the prevailing guideline value of ₹55,00,000, resulting in a potential stamp duty shortfall of approximately ₹70,000. Recommendation: PROCEED WITH CAUTION — obtain a fresh EC (within 30 days) and verify guideline value with the SRO before closing.
+Below are abbreviated excerpts showing the expected tone, specificity, citation style, and **Markdown formatting**. Adapt the format to the actual data provided.
 
---- Example: Verification Finding ---
-CRITICAL — Active Mortgage (ACTIVE_MORTGAGE):
-EC Entry #3 (Doc No. 890/2018, SRO Tambaram) records a mortgage by Muthu D/o Perumal in favour of Indian Overseas Bank for ₹12,00,000 dated 10-05-2018. No corresponding discharge or release entry was found in the subsequent EC period (2018–2024). This mortgage remains active and encumbers S.F. No. 311/1 in its entirety.
-Impact: The property cannot be conveyed with clear title until the bank releases the mortgage.
-Action: Obtain a No Objection Certificate (NOC) or Release Deed from Indian Overseas Bank.
+### Example: Executive Summary
 
---- Example: Risk Assessment ---
-The total deduction of 32 points originates from: stamp duty shortfall (−3, MEDIUM), active mortgage without discharge (−25, CRITICAL), and 2 informational warnings (−2). The single CRITICAL failure triggers a minimum 51-point deduction floor, capping the score at 49 (HIGH RISK band). However, if the mortgage is cleared with a verified release deed, the score would recover to approximately 72 (MEDIUM-LOW RISK).
+The subject property (**S.F. No. 311/1**, Chromepet Village, Tambaram Taluk, Kancheepuram District) has a **Risk Score of 68/100 (MEDIUM RISK)**. Analysis of 3 documents (EC 2010–2024, Sale Deed Doc No. 5678/2020, Patta No. 4421) reveals a continuous chain of title with one unresolved concern: the 2020 sale deed consideration (**₹45,00,000**) falls **18% below** the prevailing guideline value of ₹55,00,000, resulting in a potential stamp duty shortfall of approximately ₹70,000.
 
-=== END EXAMPLES ===
+**Recommendation:** PROCEED WITH CAUTION — obtain a fresh EC (within 30 days) and verify guideline value with the SRO before closing.
+
+### Example: Verification Finding
+
+**CRITICAL — Active Mortgage (`ACTIVE_MORTGAGE`)**
+
+EC Entry #3 (Doc No. **890/2018**, SRO Tambaram) records a mortgage by **Muthu D/o Perumal** in favour of **Indian Overseas Bank** for **₹12,00,000** dated 10-05-2018. No corresponding discharge or release entry was found in the subsequent EC period (2018–2024). This mortgage remains active and encumbers S.F. No. 311/1 in its entirety.
+
+- **Impact:** The property cannot be conveyed with clear title until the bank releases the mortgage.
+- **Action:** Obtain a No Objection Certificate (NOC) or Release Deed from Indian Overseas Bank.
+
+### Example: Risk Assessment
+
+| Deduction Source | Points | Severity |
+|---|---|---|
+| Stamp duty shortfall | −3 | MEDIUM |
+| Active mortgage without discharge | −25 | CRITICAL |
+| Informational warnings (×2) | −2 | INFO |
+| **Total Deduction** | **−32** | |
+
+The single **CRITICAL** failure triggers a minimum 51-point deduction floor, capping the score at **49 (HIGH RISK band)**. However, if the mortgage is cleared with a verified release deed, the score would recover to approximately **72 (MEDIUM-LOW RISK)**.
+
+---
+
+**END EXAMPLES** — Now generate the full report from the data provided below.

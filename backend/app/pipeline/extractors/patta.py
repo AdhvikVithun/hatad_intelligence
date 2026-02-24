@@ -429,7 +429,7 @@ class PattaExtractor(BaseExtractor):
     def __init__(self):
         self.system_prompt = (PROMPTS_DIR / "extract_patta.txt").read_text(encoding="utf-8")
 
-    async def extract(self, extracted_text: dict, on_progress: LLMProgressCallback | None = None, filename: str = "", file_path: Path | None = None) -> dict:
+    async def extract(self, extracted_text: dict, on_progress: LLMProgressCallback | None = None, filename: str = "", file_path: Path | None = None, **kwargs) -> dict:
         name = filename or "Patta"
         pages = extracted_text.get("pages", [])
 

@@ -1,7 +1,8 @@
 """Unit tests for orchestrator pure functions.
 
 Tests _compute_score_deductions, _deduplicate_checks,
-_validate_group_result, _annotate_check_confidence, and _confidence_band.
+_validate_group_result, _annotate_check_confidence, _confidence_band,
+and _extract_cot_risk_insights.
 """
 
 import pytest
@@ -12,6 +13,7 @@ from app.pipeline.orchestrator import (
     _annotate_check_confidence,
     _confidence_band,
     _compute_check_deduction,
+    _extract_cot_risk_insights,
 )
 
 
@@ -236,37 +238,39 @@ class TestDeduplicateChecks:
 class TestAnnotateCheckConfidence:
 
     def test_annotates_with_min_score(self):
+        """Min _field_confidence across all needed docs becomes the score."""
         checks = [{"status": "FAIL", "severity": "HIGH"}]
         extracted_data = {
             "ec.pdf": {
                 "document_type": "EC",
-                "data": {"_confidence_score": 0.72},
+                "data": {"_field_confidence": {"ec_number": "high", "property_description": "medium"}},
             },
             "sale.pdf": {
                 "document_type": "SALE_DEED",
-                "data": {"_confidence_score": 0.55},
+                "data": {"_field_confidence": {"consideration": "low", "stamp_duty": "high"}},
             },
         }
         _annotate_check_confidence(checks, extracted_data, ["EC", "SALE_DEED"])
-        assert checks[0]["data_confidence"] == "LOW"
-        assert checks[0]["data_confidence_score"] == 0.55
+        # EC min=0.7 (medium), SALE_DEED min=0.4 (low) → overall min=0.4
+        assert checks[0]["data_confidence"] == "VERY_LOW"
+        assert checks[0]["data_confidence_score"] == 0.4
 
     def test_filters_by_needed_types(self):
         checks = [{"status": "PASS"}]
         extracted_data = {
             "ec.pdf": {
                 "document_type": "EC",
-                "data": {"_confidence_score": 0.30},
+                "data": {"_field_confidence": {"ec_number": "low"}},
             },
             "sale.pdf": {
                 "document_type": "SALE_DEED",
-                "data": {"_confidence_score": 0.90},
+                "data": {"_field_confidence": {"buyer": "high", "seller": "high"}},
             },
         }
-        # Only SALE_DEED needed — should use 0.90 (not 0.30)
+        # Only SALE_DEED needed — should use 1.0 (not EC's 0.4)
         _annotate_check_confidence(checks, extracted_data, ["SALE_DEED"])
         assert checks[0]["data_confidence"] == "HIGH"
-        assert checks[0]["data_confidence_score"] == 0.9
+        assert checks[0]["data_confidence_score"] == 1.0
 
     def test_no_confidence_info_skips(self):
         checks = [{"status": "FAIL"}]
@@ -280,6 +284,114 @@ class TestAnnotateCheckConfidence:
         checks = [{"status": "PASS"}]
         _annotate_check_confidence(checks, {}, ["EC"])
         assert "data_confidence" not in checks[0]
+
+
+# ═══════════════════════════════════════════════════
+# _extract_cot_risk_insights (Problem 1)
+# ═══════════════════════════════════════════════════
+
+
+class TestExtractCotRiskInsights:
+    """Tests for _extract_cot_risk_insights used in verification CoT mining."""
+
+    def test_extracts_mortgage_risk(self):
+        thinking = (
+            "The EC shows a mortgage in favour of SBI dated 2018. "
+            "There is no discharge entry found in the subsequent years. "
+            "This active mortgage represents a significant encumbrance."
+        )
+        insights = _extract_cot_risk_insights(thinking)
+        assert len(insights) >= 1
+        assert any("mortgage" in i.lower() for i in insights)
+
+    def test_extracts_forgery_concern(self):
+        thinking = (
+            "The signature pattern on page 3 looks inconsistent. "
+            "There may be a forgery concern given the mismatched handwriting. "
+            "The stamp duty paid seems reasonable for the consideration amount."
+        )
+        insights = _extract_cot_risk_insights(thinking)
+        assert any("forgery" in i.lower() for i in insights)
+
+    def test_short_text_returns_empty(self):
+        assert _extract_cot_risk_insights("Short") == []
+        assert _extract_cot_risk_insights("") == []
+        assert _extract_cot_risk_insights(None) == []
+
+    def test_no_risk_patterns_returns_empty(self):
+        thinking = (
+            "The document appears to be a standard sale deed. "
+            "All fields are properly filled. "
+            "The registration details are correctly formatted."
+        )
+        insights = _extract_cot_risk_insights(thinking)
+        assert len(insights) == 0
+
+    def test_deduplicates_similar_sentences(self):
+        thinking = (
+            "This mortgage is very concerning and should be flagged. "
+            "This mortgage is very concerning and should be flagged. "
+            "A completely different encumbrance was also found."
+        )
+        insights = _extract_cot_risk_insights(thinking)
+        # Should deduplicate; expect at most 2 unique
+        assert len(insights) <= 2
+
+    def test_caps_at_ten_insights(self):
+        # Build 15 sentences with risk keywords
+        sentences = [
+            f"This mortgage #{i} poses a significant risk to the title"
+            for i in range(15)
+        ]
+        thinking = ". ".join(sentences)
+        insights = _extract_cot_risk_insights(thinking)
+        assert len(insights) <= 10
+
+
+# ═══════════════════════════════════════════════════
+# apply_amendments: deterministic check protection (Problem 2)
+# ═══════════════════════════════════════════════════
+
+
+class TestApplyAmendmentsDeterministicProtection:
+    """Self-reflection must never amend deterministic (rule-based) checks."""
+
+    def test_blocks_deterministic_amendment(self):
+        from app.pipeline.self_reflection import apply_amendments
+        checks = [
+            {"rule_code": "DET_STAMP_DUTY", "status": "FAIL", "severity": "HIGH",
+             "source": "deterministic", "explanation": "Stamp duty shortfall detected"},
+            {"rule_code": "MORTGAGE_CHECK", "status": "WARNING", "severity": "MEDIUM",
+             "source": "llm", "explanation": "Possible mortgage concern"},
+        ]
+        amendments = [
+            {"rule_code": "DET_STAMP_DUTY", "amended_status": "PASS",
+             "reason": "LLM thinks duty is fine", "issue": "STATUS_EVIDENCE_CONTRADICTION"},
+            {"rule_code": "MORTGAGE_CHECK", "amended_status": "FAIL",
+             "reason": "Evidence shows active mortgage", "issue": "STATUS_EVIDENCE_CONTRADICTION"},
+        ]
+        applied = apply_amendments(checks, amendments)
+        # DET_STAMP_DUTY should remain FAIL (blocked)
+        assert checks[0]["status"] == "FAIL"
+        assert "reflected" not in checks[0]
+        # MORTGAGE_CHECK should be amended to FAIL
+        assert checks[1]["status"] == "FAIL"
+        assert checks[1].get("reflected") is True
+        assert applied == 1  # Only the LLM check was amended
+
+    def test_deterministic_pass_not_amended(self):
+        from app.pipeline.self_reflection import apply_amendments
+        checks = [
+            {"rule_code": "DET_SURVEY_MATCH", "status": "PASS", "severity": "HIGH",
+             "source": "deterministic", "explanation": "Survey numbers match"},
+        ]
+        amendments = [
+            {"rule_code": "DET_SURVEY_MATCH", "amended_status": "WARNING",
+             "reason": "LLM thinks mismatch", "issue": "STATUS_EVIDENCE_CONTRADICTION"},
+        ]
+        applied = apply_amendments(checks, amendments)
+        assert checks[0]["status"] == "PASS"  # Unchanged
+        assert applied == 0
 
 
 # ═══════════════════════════════════════════════════

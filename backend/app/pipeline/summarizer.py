@@ -41,7 +41,7 @@ async def summarize_document(
     if doc_type == "EC":
         return await _summarize_ec(extracted_data, on_progress)
     elif doc_type == "SALE_DEED":
-        return _compact_sale_deed(extracted_data)
+        return await _summarize_sale_deed(extracted_data, on_progress)
     else:
         # Patta, Chitta, FMB, Generic — already small, pass through
         return extracted_data
@@ -183,7 +183,7 @@ async def _llm_enrich_ec(
             expect_json=True,
             task_label="EC LLM Summary (Tier 5)",
             on_progress=on_progress,
-            think=False,
+            think=True,  # CoT improves analytical summary (ownership chain, suspicious patterns)
         )
         if isinstance(result, dict):
             return result
@@ -194,49 +194,141 @@ async def _llm_enrich_ec(
         return None
 
 
-def _compact_sale_deed(data: dict) -> dict:
-    """Trim verbose Sale Deed fields — no LLM call needed."""
+# ── Sale Deed summarization: Tiered approach ──
+# Thresholds mirror EC approach but with Sale Deed-specific logic.
+_SD_SUMMARY_THRESHOLD = 30_000  # chars — most sale deeds are smaller than ECs
+_SD_LLM_ENRICHMENT_THRESHOLD = 3  # ownership_history entries — trigger LLM for complex chains
+
+
+async def _summarize_sale_deed(data: dict, on_progress: LLMProgressCallback | None = None) -> dict:
+    """Tiered compaction for Sale Deed extracted data.
+
+    Tier 0: Small deed (< threshold) → pass through unchanged
+    Tier 1: Deterministic trimming — cap ownership_history, special_conditions, witnesses
+    Tier 2: LLM enrichment for complex deeds (ownership chain analysis, risk flags)
+    """
+    raw_json = json.dumps(data, indent=2, default=str, ensure_ascii=False)
+
+    # Tier 0: Small enough — pass through
+    if len(raw_json) < _SD_SUMMARY_THRESHOLD:
+        # Still check if LLM enrichment would add value
+        oh = data.get("ownership_history", [])
+        if isinstance(oh, list) and len(oh) >= _SD_LLM_ENRICHMENT_THRESHOLD:
+            llm_summary = await _llm_enrich_sale_deed(data, on_progress)
+            if llm_summary:
+                data["_llm_summary"] = llm_summary
+                data["_compaction_tier"] = 2
+                logger.info("Sale Deed Tier 2 LLM enrichment applied (small doc but complex chain)")
+        return data
+
+    # Tier 1: Deterministic trimming
     compact = {}
-    # Keep essential fields — must match schema keys from extraction
     for key in [
-        "document_number", "registration_date", "sro",
-        "seller", "buyer", "property_schedule",
-        "property",  # nested object: survey_number, village, boundaries etc.
-        "financials",  # nested object: consideration, guideline_value, stamp_duty
-        "consideration_amount", "guideline_value", "stamp_duty",
-        "survey_number", "extent", "boundaries",
-        "encumbrances", "conditions",
-        "previous_ownership", "execution_date",
-        "ownership_history", "payment_mode",
-        "encumbrance_declaration", "possession_date",
+        "document_number", "registration_date", "execution_date", "sro",
+        "seller", "buyer", "property", "property_description",
+        "financials", "stamp_paper", "registration_details",
+        "payment_mode", "previous_ownership",
+        "ownership_history", "encumbrance_declaration", "possession_date",
+        "witnesses", "special_conditions", "power_of_attorney", "remarks",
     ]:
         if key in data:
             compact[key] = data[key]
 
-    # Truncate verbose fields
-    if "property_description" in data:
-        pd = data["property_description"]
-        if isinstance(pd, str) and len(pd) > 500:
-            compact["property_description"] = pd[:500] + "…"
-        else:
-            compact["property_description"] = pd
-
+    # Cap ownership_history to 15
     if "ownership_history" in compact:
         oh = compact["ownership_history"]
-        if isinstance(oh, list) and len(oh) > 5:
-            compact["ownership_history"] = oh[:5]
+        if isinstance(oh, list) and len(oh) > 15:
+            compact["ownership_history"] = oh[:15]
 
-    if "special_conditions" in data:
-        sc = data["special_conditions"]
-        if isinstance(sc, list) and len(sc) > 5:
-            compact["special_conditions"] = sc[:5] + [f"... and {len(sc) - 5} more"]
-        else:
-            compact["special_conditions"] = sc
+    # Cap special_conditions to 10
+    if "special_conditions" in compact:
+        sc = compact["special_conditions"]
+        if isinstance(sc, list) and len(sc) > 10:
+            compact["special_conditions"] = sc[:10] + [f"... and {len(sc) - 10} more"]
 
-    if "witnesses" in data:
-        compact["witness_count"] = len(data["witnesses"]) if isinstance(data["witnesses"], list) else 1
+    # Preserve full witness list (capped at 10)
+    if "witnesses" in compact:
+        witnesses = compact["witnesses"]
+        if isinstance(witnesses, list):
+            compact["witnesses"] = witnesses[:10]
+            compact["witness_count"] = len(witnesses)
+
+    # Truncate property_description to 800 chars
+    pd = compact.get("property_description", "")
+    if isinstance(pd, str) and len(pd) > 800:
+        compact["property_description"] = pd[:800] + "…"
+
+    # Preserve extraction-time analysis fields
+    for meta_key in ("_extraction_red_flags", "_field_confidence"):
+        if meta_key in data:
+            compact[meta_key] = data[meta_key]
+
+    compact["_is_compacted"] = True
+    compact["_compaction_tier"] = 1
+
+    compact_json = json.dumps(compact, separators=(",", ":"), default=str, ensure_ascii=False)
+    logger.info(
+        f"Sale Deed compacted (Tier 1): {len(raw_json):,} → {len(compact_json):,} chars"
+    )
+
+    # ── Tier 2: LLM analytical enrichment ────────
+    oh = data.get("ownership_history", [])
+    if isinstance(oh, list) and len(oh) >= _SD_LLM_ENRICHMENT_THRESHOLD:
+        llm_summary = await _llm_enrich_sale_deed(compact, on_progress)
+        if llm_summary:
+            compact["_llm_summary"] = llm_summary
+            compact["_compaction_tier"] = 2
+            logger.info(
+                f"Sale Deed Tier 2 LLM enrichment: "
+                f"risk_flags={len(llm_summary.get('risk_flags', []))}, "
+                f"chain={len(llm_summary.get('ownership_chain', []))}"
+            )
 
     return compact
+
+
+async def _llm_enrich_sale_deed(
+    data: dict,
+    on_progress: LLMProgressCallback | None = None,
+) -> dict | None:
+    """Tier 2: LLM analytical enrichment for Sale Deeds.
+
+    Uses the ``summarize_sale_deed.txt`` prompt to derive transaction summary,
+    ownership chain analysis, risk flags, and completeness assessment.
+    Returns the parsed JSON or ``None`` on failure (non-fatal).
+    """
+    from app.pipeline.llm_client import call_llm
+    from app.pipeline.schemas import SUMMARIZE_SALE_DEED_SCHEMA
+
+    prompt_path = PROMPTS_DIR / "summarize_sale_deed.txt"
+    if not prompt_path.exists():
+        logger.warning("summarize_sale_deed.txt prompt not found — skipping Sale Deed LLM enrichment")
+        return None
+
+    system_prompt = prompt_path.read_text(encoding="utf-8").strip()
+
+    # Build compact JSON payload
+    user_prompt = json.dumps(data, separators=(",", ":"), default=str, ensure_ascii=False)
+    if len(user_prompt) > 55_000:
+        user_prompt = user_prompt[:55_000] + "...(truncated)"
+
+    try:
+        result = await call_llm(
+            prompt=user_prompt,
+            system_prompt=system_prompt,
+            temperature=0.1,
+            expect_json=SUMMARIZE_SALE_DEED_SCHEMA,
+            task_label="Sale Deed LLM Summary (Tier 2)",
+            on_progress=on_progress,
+            think=True,
+        )
+        if isinstance(result, dict):
+            return result
+        logger.warning(f"Sale Deed Tier 2 LLM enrichment returned non-dict: {type(result)}")
+        return None
+    except Exception as exc:
+        logger.warning(f"Sale Deed Tier 2 LLM enrichment failed (non-fatal): {exc}")
+        return None
 
 
 def build_compact_summary(extracted_data: dict, summaries: dict) -> str:
@@ -250,8 +342,8 @@ def build_compact_summary(extracted_data: dict, summaries: dict) -> str:
         content = summaries.get(filename) or data.get("data")
 
         if content:
-            # Use compact JSON (no indent) to save space
-            json_str = json.dumps(content, separators=(",", ":"), default=str, ensure_ascii=False)
+            # Use indented JSON for better LLM comprehension
+            json_str = json.dumps(content, indent=2, default=str, ensure_ascii=False)
             parts.append(f"═══ {doc_type}: {filename} ═══\n{json_str}")
         else:
             error = data.get("error", "No data extracted")

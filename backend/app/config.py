@@ -22,7 +22,7 @@ for d in [TEMP_DIR, UPLOAD_DIR, REPORTS_DIR, SESSIONS_DIR]:
 
 # Ollama configuration
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gpt-oss:20b")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:32b")
 
 # Vision model — REMOVED (qwen3-vl unreliable; all intelligence via gpt-oss now)
 # Sarvam provides OCR text, gpt-oss does all reasoning/extraction.
@@ -31,22 +31,30 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gpt-oss:20b")
 
 # Concurrency
 MAX_CONCURRENT_ANALYSES = int(os.getenv("MAX_CONCURRENT_ANALYSES", "1"))  # Parallel analysis pipelines
+EXTRACTION_CONCURRENCY = int(os.getenv("EXTRACTION_CONCURRENCY", "2"))    # Parallel doc extractions (requires OLLAMA_NUM_PARALLEL>=N for real speedup)
 
 # Processing
-MAX_CHUNK_PAGES = 10  # Max pages per LLM chunk for large documents
-MAX_CHUNK_CHARS = 60000  # Hard char budget per extraction chunk (~15K tokens, fits 64K window)
-LLM_TIMEOUT = 900  # 15 min per LLM call — model may think 70K+ chars before outputting JSON
+MAX_CHUNK_PAGES = 20  # Max pages per LLM chunk — doubled with 128K window
+MAX_CHUNK_CHARS = 120000  # Hard char budget per extraction chunk (~30K tokens, fits 128K window)
+LLM_TIMEOUT = 1200  # 20 min per LLM call — 128K input + CoT can take longer
 LLM_MAX_RETRIES = 3
-LLM_CONTEXT_WINDOW = 65536  # 64K tokens — match Ollama desktop setting
-LLM_MAX_INPUT_CHARS = 200000  # Safety cap: ~50K tokens input before truncation
-LLM_WARN_INPUT_CHARS = 160000  # ~40K tokens — log a warning above this
+LLM_CONTEXT_WINDOW = 131072  # 128K tokens — matches Ollama desktop setting (qwen3:32b native)
+LLM_MAX_INPUT_CHARS = 480000  # Safety cap: ~120K tokens input before truncation
+LLM_WARN_INPUT_CHARS = 400000  # ~100K tokens — log a warning above this
 
-# gpt-oss:20b advanced capabilities
+# qwen3:32b advanced capabilities
 LLM_USE_STRUCTURED_OUTPUTS = True   # Use JSON Schema format instead of "json"
-LLM_USE_THINKING = True             # Enable chain-of-thought (think: true)
+LLM_USE_THINKING = True             # Enable chain-of-thought (think: true) — hybrid mode
 LLM_USE_TOOLS = True                # Enable function/tool calling
-LLM_TOOL_CALL_MAX_ROUNDS = 2       # Max tool call round-trips per LLM call
+LLM_TOOL_CALL_MAX_ROUNDS = 5       # Max tool call round-trips — raised for complex verification groups
 LLM_MAX_CONCURRENT_CHUNKS = 3      # Max parallel LLM calls for chunked docs
+
+# Classification thresholds (externalized from classifier.py)
+CLASSIFY_MAX_CHARS = int(os.getenv("CLASSIFY_MAX_CHARS", "4000"))         # Max chars sent to LLM for classification
+CLASSIFY_MAX_PAGES = int(os.getenv("CLASSIFY_MAX_PAGES", "2"))            # Best pages selected for first pass
+CLASSIFY_MAX_TOKENS = int(os.getenv("CLASSIFY_MAX_TOKENS", "1024"))       # Max output tokens for classification
+CLASSIFY_RETRY_MAX_CHARS = int(os.getenv("CLASSIFY_RETRY_MAX_CHARS", "8000"))  # Expanded context on retry
+CLASSIFY_RETRY_MAX_PAGES = int(os.getenv("CLASSIFY_RETRY_MAX_PAGES", "4"))     # Expanded pages on retry
 
 # RAG / Knowledge Base
 RAG_ENABLED = True                  # Feature flag — disable to skip RAG entirely
@@ -63,6 +71,36 @@ RAG_PRE_INDEX = True                # Index raw OCR text before extraction (enab
 CHROMA_DIR = TEMP_DIR / "vectordb"  # ChromaDB persistent storage
 CHROMA_DIR.mkdir(parents=True, exist_ok=True)
 
+# Document-type-aware RAG profiles — overrides per doc type
+# Each profile only specifies overrides; unspecified keys inherit from globals above.
+# Set RAG_PROFILE_ENABLED=false to collapse all profiles to global defaults (instant rollback).
+RAG_PROFILE_ENABLED = os.getenv("RAG_PROFILE_ENABLED", "true").strip().lower() in ("1", "true", "yes")
+RAG_DOC_PROFILES: dict[str, dict] = {
+    "EC":          {"chunk_size": 800,  "top_k": 6, "mmr_lambda": 0.5},   # smaller chunks keep txns atomic; lambda favours diversity across time periods
+    "SALE_DEED":   {"chunk_size": 1500, "overlap": 300},                   # long narratives need larger context windows
+    "PATTA":       {"chunk_size": 600,  "overlap": 100, "top_k": 3},      # tabular — answer usually in 1-2 rows
+    "A_REGISTER":  {"chunk_size": 600,  "overlap": 100, "top_k": 3},      # same structure as Patta
+}
+
+def get_rag_profile(doc_type: str = "") -> dict:
+    """Return merged RAG parameters for a document type.
+
+    Falls back to global defaults when RAG_PROFILE_ENABLED is False
+    or when no profile exists for the doc type.
+    """
+    defaults = {
+        "chunk_size": RAG_CHUNK_SIZE,
+        "overlap": RAG_CHUNK_OVERLAP,
+        "top_k": RAG_TOP_K,
+        "mmr_lambda": RAG_MMR_LAMBDA,
+        "max_distance": RAG_MAX_DISTANCE,
+        "keyword_boost": RAG_KEYWORD_BOOST,
+    }
+    if not RAG_PROFILE_ENABLED or not doc_type:
+        return defaults
+    overrides = RAG_DOC_PROFILES.get(doc_type, {})
+    return {**defaults, **overrides}
+
 # Sarvam AI Document Intelligence — cloud OCR for Tamil documents
 # Set SARVAM_API_KEY to enable; leave empty to disable (zero-cost default)
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "")
@@ -72,6 +110,15 @@ SARVAM_POLL_INTERVAL = int(os.getenv("SARVAM_POLL_INTERVAL", "3"))      # Second
 SARVAM_TIMEOUT = int(os.getenv("SARVAM_TIMEOUT", "120"))               # Max seconds per attempt
 SARVAM_MAX_RETRIES = int(os.getenv("SARVAM_MAX_RETRIES", "2"))         # Retry failed/timed-out jobs
 SARVAM_MAX_FILE_MB = int(os.getenv("SARVAM_MAX_FILE_MB", "40"))        # Skip files larger than this
+SARVAM_CONCURRENCY = int(os.getenv("SARVAM_CONCURRENCY", "1"))          # Max concurrent Sarvam jobs (1 = serial, avoids 429)
+
+# Adobe PDF Services — secondary cloud OCR (fallback when Sarvam fails/disabled)
+# Set ADOBE_PDF_CLIENT_ID + ADOBE_PDF_CLIENT_SECRET to enable
+ADOBE_PDF_CLIENT_ID = os.getenv("ADOBE_PDF_CLIENT_ID", "")
+ADOBE_PDF_CLIENT_SECRET = os.getenv("ADOBE_PDF_CLIENT_SECRET", "")
+ADOBE_PDF_ENABLED = bool(ADOBE_PDF_CLIENT_ID and ADOBE_PDF_CLIENT_SECRET)
+ADOBE_PDF_TIMEOUT = int(os.getenv("ADOBE_PDF_TIMEOUT", "90"))          # Max seconds per job
+ADOBE_PDF_MAX_FILE_MB = int(os.getenv("ADOBE_PDF_MAX_FILE_MB", "100"))  # Adobe supports up to 100MB
 
 # Debug trace mode — set HATAD_TRACE=1 to get detailed deterministic engine logs
 TRACE_ENABLED = os.getenv("HATAD_TRACE", "").strip().lower() in ("1", "true", "yes")

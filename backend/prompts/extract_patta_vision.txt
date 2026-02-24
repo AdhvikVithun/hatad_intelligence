@@ -56,4 +56,8 @@ TAMIL-SPECIFIC RULES:
 - Survey prefixes: Preserve S.F.No., T.S.No., R.S.No., O.S.No., N.S.No.
 - Land types: நன்செய் (nanjai/wet), புன்செய் (punjai/dry), தோட்டம் (garden), மனை (house site).
 
+PER-FIELD CONFIDENCE: In "_field_confidence", list any field where you are less than 90% confident in the extracted value. Use the field name as key and confidence (0.0-1.0) as value.
+
+EXTRACTION RED FLAGS: In "_extraction_red_flags", list ANY suspicious patterns. Examples: poramboke classification, inconsistent extent across surveys, missing owner details, classification mismatch with stated use.
+
 Return ONLY valid JSON matching the required schema.

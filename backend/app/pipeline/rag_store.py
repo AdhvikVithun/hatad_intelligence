@@ -18,13 +18,14 @@ import re
 from dataclasses import dataclass
 from typing import Callable, Awaitable
 
+import numpy as np
 import chromadb
 from chromadb.config import Settings
 
 from app.config import (
     CHROMA_DIR, RAG_CHUNK_SIZE, RAG_CHUNK_OVERLAP, RAG_TOP_K,
     RAG_MIN_CHUNK_CHARS, RAG_MAX_DISTANCE, RAG_MMR_LAMBDA,
-    RAG_KEYWORD_BOOST,
+    RAG_KEYWORD_BOOST, get_rag_profile,
 )
 
 logger = logging.getLogger(__name__)
@@ -124,6 +125,7 @@ class RAGStore:
         pages: list[dict],
         embed_fn: Callable[[list[str]], Awaitable[list[list[float]]]],
         on_progress: Callable | None = None,
+        doc_type: str = "",
     ) -> int:
         """Index all pages of a document into the vector store.
 
@@ -132,10 +134,15 @@ class RAGStore:
             pages: List of {"page_number": int, "text": str, ...}
             embed_fn: async function that takes list[str] → list[list[float]]
             on_progress: Optional progress callback
+            doc_type: Document type (e.g. "EC", "SALE_DEED") for profile-based chunking
 
         Returns:
             Number of chunks indexed
         """
+        profile = get_rag_profile(doc_type)
+        chunk_size = profile["chunk_size"]
+        overlap = profile["overlap"]
+
         all_chunks: list[str] = []
         all_metas: list[dict] = []
         all_ids: list[str] = []
@@ -146,7 +153,7 @@ class RAGStore:
             if not text.strip():
                 continue
 
-            chunks = self._chunk_text(text)
+            chunks = self._chunk_text(text, chunk_size=chunk_size, overlap=overlap)
             for ci, chunk in enumerate(chunks):
                 chunk_id = f"{filename}__p{page_num}__c{ci}"
                 all_chunks.append(chunk)
@@ -265,6 +272,11 @@ class RAGStore:
                 "transaction_type": txn_type.lower().strip(),
                 "has_survey": bool(survey),
             }
+            # Preserve page provenance from extraction (stamped by _run_chunked)
+            source_pages = txn.get("source_pages")
+            if source_pages:
+                meta["source_page_start"] = source_pages[0]
+                meta["source_page_end"] = source_pages[-1]
 
             chunk_id = f"{filename}__txn_{tid}"
             all_texts.append(text)
@@ -367,13 +379,42 @@ class RAGStore:
         "then", "than", "them", "into", "also", "after", "other", "should",
         "could", "would", "about", "these", "there", "document", "documents",
         "find", "search", "check", "verify", "whether", "name", "value",
+        # Tamil post-stemming stopwords — high-frequency functional words
+        # that survive suffix stripping and add no retrieval signal.
+        "இந்த", "அந்த", "என்ற", "அல்லது", "மற்றும்", "உள்ள",
+        "ஒரு", "இது", "அது", "என்", "ஆன", "ஆக", "போல",
+        "மேல", "கீழ",
     })
+
+    # Tamil agglutinative suffixes — longest-first so greedy stripping
+    # removes the maximal suffix (e.g. -களின் before -கள்).
+    _TAMIL_SUFFIXES: tuple[str, ...] = (
+        "களுக்கு", "களிடம்", "களின்", "களால்", "களை", "கள்",
+        "த்தினால்", "த்திற்கு", "த்தின்", "த்தை", "த்து",
+        "த்தில்", "னுடைய", "விடம்", "வுக்கு", "யிடம்",
+        "யில்", "க்கு", "க்கான", "யின்", "யை", "ன்",
+        "ில்", "ால்", "ிடம்", "ுடன்", "ுக்கு",
+    )
+
+    @staticmethod
+    def _normalize_tamil_token(token: str) -> str:
+        """Strip agglutinative suffixes from a Tamil token.
+
+        Uses a longest-first greedy approach: scan the suffix list
+        (sorted by length descending) and strip the first match.
+        Only one pass — avoids over-stemming.
+        """
+        for suffix in RAGStore._TAMIL_SUFFIXES:
+            if token.endswith(suffix) and len(token) > len(suffix) + 1:
+                return token[: -len(suffix)]
+        return token
 
     @staticmethod
     def _extract_keywords(query: str) -> list[str]:
         """Extract significant keywords from a query string.
 
         Returns lowercased tokens (3+ chars, not stopwords).
+        Tamil tokens are suffix-normalized before stopword check.
         Numeric / identifier-like tokens (contain digits) are always included
         regardless of stopword list.
         """
@@ -382,12 +423,14 @@ class RAGStore:
         seen: set[str] = set()
         for tok in tokens:
             low = tok.lower()
-            if low in seen:
+            # Normalize Tamil agglutinative forms
+            normalized = RAGStore._normalize_tamil_token(low)
+            if normalized in seen:
                 continue
-            seen.add(low)
-            has_digit = any(c.isdigit() for c in low)
-            if has_digit or low not in RAGStore._STOP_WORDS:
-                result.append(low)
+            seen.add(normalized)
+            has_digit = any(c.isdigit() for c in normalized)
+            if has_digit or normalized not in RAGStore._STOP_WORDS:
+                result.append(normalized)
         return result
 
     @staticmethod
@@ -396,17 +439,24 @@ class RAGStore:
 
         Numeric / identifier keywords receive 2× weight so that exact survey
         numbers or document numbers boost the score more than generic terms.
+        Tamil tokens in doc_text are suffix-normalized before matching.
         Returns 0.0–1.0.
         """
         if not keywords:
             return 0.0
         doc_lower = doc_text.lower()
+        # Build a set of normalized tokens from the document for Tamil matching
+        doc_tokens = set()
+        for tok in re.findall(r"[\w/.-]{3,}", doc_lower):
+            doc_tokens.add(tok)
+            doc_tokens.add(RAGStore._normalize_tamil_token(tok))
         total_weight = 0.0
         hit_weight = 0.0
         for kw in keywords:
             w = 2.0 if any(c.isdigit() for c in kw) else 1.0
             total_weight += w
-            if kw in doc_lower:
+            # Match if keyword appears as substring OR as normalized token
+            if kw in doc_lower or kw in doc_tokens:
                 hit_weight += w
         return hit_weight / total_weight if total_weight else 0.0
 
@@ -486,6 +536,7 @@ class RAGStore:
         filter_transaction_type: str | None = None,
         lambda_param: float = RAG_MMR_LAMBDA,
         query_text: str | None = None,
+        doc_type: str = "",
     ) -> list[RetrievedChunk]:
         """MMR (Maximal Marginal Relevance) retrieval for diverse results.
 
@@ -505,6 +556,14 @@ class RAGStore:
 
         Returns `n_results` chunks balancing relevance + diversity.
         """
+        # Apply doc-type profile overrides (if not explicitly overridden by caller)
+        if doc_type:
+            profile = get_rag_profile(doc_type)
+            if n_results == RAG_TOP_K:
+                n_results = profile["top_k"]
+            if lambda_param == RAG_MMR_LAMBDA:
+                lambda_param = profile["mmr_lambda"]
+
         if self._indexed_count == 0:
             return []
 
@@ -573,13 +632,27 @@ class RAGStore:
                 for c in candidates[:n_results]
             ]
 
-        # MMR greedy selection
+        # MMR greedy selection — numpy-vectorized dot products
         selected: list[dict] = []
         remaining = list(candidates)
+
+        # Pre-convert embeddings to numpy arrays for fast dot products
+        for cand in remaining:
+            if cand["embed"] is not None:
+                cand["_np_embed"] = np.asarray(cand["embed"], dtype=np.float32)
+            else:
+                cand["_np_embed"] = None
 
         for _ in range(min(n_results, len(remaining))):
             best_score = -float('inf')
             best_idx = 0
+
+            # Build matrix of selected embeddings for batch dot product
+            sel_matrix = None
+            if selected:
+                sel_embeds = [s["_np_embed"] for s in selected if s["_np_embed"] is not None]
+                if sel_embeds:
+                    sel_matrix = np.stack(sel_embeds)  # (S, D)
 
             for ri, cand in enumerate(remaining):
                 # Relevance to query (semantic + keyword boost)
@@ -587,12 +660,9 @@ class RAGStore:
 
                 # Max similarity to already selected (diversity penalty)
                 max_sim_to_selected = 0.0
-                if selected and cand["embed"] is not None:
-                    for sel in selected:
-                        if sel["embed"] is not None:
-                            # Cosine similarity between candidate and selected
-                            dot = sum(a * b for a, b in zip(cand["embed"], sel["embed"]))
-                            max_sim_to_selected = max(max_sim_to_selected, dot)
+                if sel_matrix is not None and cand["_np_embed"] is not None:
+                    sims = sel_matrix @ cand["_np_embed"]  # (S,) dot products
+                    max_sim_to_selected = float(sims.max())
 
                 mmr_score = lambda_param * rel - (1 - lambda_param) * max_sim_to_selected
                 if mmr_score > best_score:

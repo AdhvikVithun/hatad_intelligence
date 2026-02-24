@@ -186,6 +186,10 @@ export function useAnalysis() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const progressEndRef = useRef<HTMLDivElement>(null);
   const startTimeRef = useRef<number>(0);
+  // Stash the SSE final event so we can build a partial session if getResults fails
+  const sseFinalRef = useRef<{
+    session_id: string; risk_score: number | null; risk_band: string | null;
+  } | null>(null);
 
   // Toast helper
   const showToast = useCallback((type: Toast['type'], message: string) => {
@@ -289,6 +293,7 @@ export function useAnalysis() {
     setSession(null);
     setActiveTab('pipeline');
     setElapsed(0);
+    sseFinalRef.current = null;
 
     try {
       const filenames = files.map(f => f.filename);
@@ -306,6 +311,14 @@ export function useAnalysis() {
             detail: data.detail || undefined,
           }]);
           if (data.documents) setFiles(data.documents);
+          // Capture the SSE final event for fallback session construction
+          if (data.stage === 'final') {
+            sseFinalRef.current = {
+              session_id: data.session_id ?? sid,
+              risk_score: data.risk_score ?? null,
+              risk_band: data.risk_band ?? null,
+            };
+          }
         },
         async () => {
           try {
@@ -314,8 +327,33 @@ export function useAnalysis() {
             if (fullResults?.incomplete) {
               showToast('info', 'Analysis completed with errors — some results may be incomplete.');
             }
-          } catch {
-            showToast('error', 'Analysis failed to complete. Check the pipeline log for details.');
+          } catch (err: any) {
+            console.error('[HATAD] getResults failed after pipeline completed:', err);
+            // Build a partial session from SSE final event so we don't show error banner
+            const sse = sseFinalRef.current;
+            if (sse) {
+              const partialSession: SessionData = {
+                session_id: sse.session_id,
+                status: 'completed',
+                risk_score: sse.risk_score,
+                risk_band: sse.risk_band,
+                documents: files,
+                extracted_data: {},
+                memory_bank: null,
+                verification_result: null,
+                identity_clusters: null,
+                narrative_report: null,
+                progress: [],
+              };
+              setSession(partialSession);
+              showToast('warning',
+                'Results partially loaded — risk score is available but details may be incomplete. ' +
+                'Try loading from session history for full results.');
+            } else {
+              showToast('error',
+                `Analysis completed but results could not be loaded: ${err?.message || 'Unknown error'}. ` +
+                'Try loading from session history.');
+            }
           }
           setProcessing(false);
         },
@@ -341,13 +379,14 @@ export function useAnalysis() {
     setProcessing(false);
     setActiveTab('pipeline');
     setElapsed(0);
+    sseFinalRef.current = null;
     showToast('info', 'Workspace cleared');
   }, [files, session, showToast]);
 
-  // Derived data
+  // Derived data — fall back to top-level session fields for partial sessions
   const verification = session?.verification_result;
-  const riskScore = verification?.risk_score ?? null;
-  const riskBand = verification?.risk_band ?? null;
+  const riskScore = verification?.risk_score ?? session?.risk_score ?? null;
+  const riskBand = verification?.risk_band ?? session?.risk_band ?? null;
   const checks = verification?.checks ?? [];
   const chain = verification?.chain_of_title ?? [];
   const redFlags = verification?.red_flags ?? [];

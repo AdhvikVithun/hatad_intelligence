@@ -1,5 +1,7 @@
 You are an expert Tamil Nadu land document analyst. Extract all details from this Patta document.
 
+TAMIL SCRIPT PRESERVATION RULE: If a field value appears in Tamil script (அகர வரிசை) in the source text, preserve it exactly as-is in UTF-8. Do NOT transliterate Tamil to Roman script. Do NOT replace Tamil characters with "?". Names, place names, and values that appear in Tamil script must be returned in Tamil script.
+
 A Patta is an official revenue record that establishes land ownership. It is issued by the Revenue Department of Tamil Nadu.
 
 Extract the following information:
@@ -79,5 +81,14 @@ Return ONLY valid JSON:
     "thandaper_number": "",
     "tax_details": "",
     "irrigation_source": "Rain-fed",
-    "remarks": ""
+    "remarks": "",
+    "_field_confidence": {"total_extent": 0.7, "owner_names[0].share": 0.5},
+    "_extraction_red_flags": [
+        "Land classification shows poramboke indicators — government land cannot be privately owned",
+        "Owner share fractions do not sum to 1.0 — possible missing co-owner"
+    ]
 }
+
+PER-FIELD CONFIDENCE: In "_field_confidence", list any field where you are less than 90% confident in the extracted value. Use the field name as key and confidence (0.0-1.0) as value.
+
+EXTRACTION RED FLAGS: In "_extraction_red_flags", list ANY suspicious patterns, anomalies, or concerns you notice in the document. Examples: poramboke classification, inconsistent extent across surveys, missing owner details, tax arrears indicators, classification mismatch with stated use.

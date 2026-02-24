@@ -37,5 +37,5 @@ class ChittaExtractor(BaseExtractor):
             expect_json=EXTRACT_CHITTA_SCHEMA,
             task_label=f"{name} extraction ({len(full_text):,} chars)",
             on_progress=on_progress,
-            think=True,
+            think=False,  # Simple tabular lookup — no CoT needed
         )

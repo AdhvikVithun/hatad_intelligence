@@ -36,6 +36,8 @@ CRITICAL DISAMBIGUATION — PATTA vs A_REGISTER vs SALE DEED:
 - If a document shows "பட்டா" in the title without "அ-பதிவேடு" → PATTA.
 - Multiple survey entries in table format = PATTA or A_REGISTER (check the title). Narrative text about property transfer = SALE_DEED.
 
+/no_think
+
 Return ONLY valid JSON in this exact format:
 {
     "document_type": "EC",
@@ -43,4 +45,13 @@ Return ONLY valid JSON in this exact format:
     "language": "tamil_english",
     "key_identifiers": ["Encumbrance Certificate", "EC No"],
     "reasoning": "Brief explanation of why this classification"
+}
+
+Another example (A-Register):
+{
+    "document_type": "A_REGISTER",
+    "confidence": 0.90,
+    "language": "tamil",
+    "key_identifiers": ["அ-பதிவேடு", "பட்டா எண்", "புல எண்"],
+    "reasoning": "Header says அ-பதிவேடு (A-Register), village-level revenue extract with patta numbers and survey entries"
 }

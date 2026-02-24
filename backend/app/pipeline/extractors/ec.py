@@ -198,13 +198,20 @@ class ECExtractor(BaseExtractor):
         sem = asyncio.Semaphore(LLM_MAX_CONCURRENT_CHUNKS)
         logger.info(f"ECExtractor: {len(chunks)} chunks, concurrency={LLM_MAX_CONCURRENT_CHUNKS}")
 
-        async def _limited_extract(chunk_text: str, idx: int):
+        async def _limited_extract(chunk: dict, idx: int):
             async with sem:
-                return await self._extract_chunk(
-                    chunk_text, idx + 1, len(chunks), on_progress,
+                result = await self._extract_chunk(
+                    chunk["text"], idx + 1, len(chunks), on_progress,
                 )
+                # Stamp source page range onto each extracted transaction
+                start_pg = chunk.get("start_page")
+                end_pg = chunk.get("end_page")
+                if start_pg is not None and end_pg is not None:
+                    for txn in result.get("transactions", []):
+                        txn["source_pages"] = [start_pg, end_pg]
+                return result
 
-        tasks = [_limited_extract(chunk["text"], i) for i, chunk in enumerate(chunks)]
+        tasks = [_limited_extract(chunk, i) for i, chunk in enumerate(chunks)]
         chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
         return self._merge_results(chunk_results, total_pages)
 

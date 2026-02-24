@@ -7,7 +7,7 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
-        target: 'http://localhost:8001',
+        target: 'http://localhost:8000',
         changeOrigin: true,
         timeout: 3600000,      // 60 min — large doc analysis can take 30-45 min
         proxyTimeout: 3600000, // 60 min — prevent proxy from killing SSE streams

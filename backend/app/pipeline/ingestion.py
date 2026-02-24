@@ -32,6 +32,7 @@ _TESSERACT_CANDIDATES = [
 # Poppler bin path for pdf2image
 _POPPLER_CANDIDATES = [
     os.getenv("POPPLER_PATH", ""),
+    str(Path(os.environ.get("USERPROFILE", "")) / "poppler" / "poppler-24.08.0" / "Library" / "bin"),
     str(Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "poppler" / "poppler-24.08.0" / "Library" / "bin"),
     r"C:\Program Files\poppler\Library\bin",
 ]

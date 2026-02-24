@@ -111,6 +111,90 @@ class TestIngestion:
         assert len(survey_facts) >= 1
         assert any(f["value"] == "311/1" for f in survey_facts)
 
+    def test_ingest_sale_deed_ownership_history(self):
+        """ownership_history[] from recitals should be ingested as chain + party facts."""
+        bank = MemoryBank()
+        deed_data = {
+            "document_number": "5909/2012",
+            "seller": [{"name": "N. Thulasiram"}],
+            "buyer": [{"name": "A. Ponnarasi"}],
+            "property": {"survey_number": "317/1A", "village": "Somayampalayam"},
+            "financials": {"consideration_amount": "5000000"},
+            "previous_ownership": {
+                "document_number": "1234/1992",
+                "document_date": "1992-01-20",
+                "previous_owner": "M. Aarumugam",
+                "acquisition_mode": "Sale",
+            },
+            "ownership_history": [
+                {
+                    "owner": "M. Aarumugam",
+                    "acquired_from": "Government patta",
+                    "acquisition_mode": "Settlement",
+                    "document_number": "",
+                    "document_date": "",
+                    "remarks": "Original patta holder",
+                },
+                {
+                    "owner": "N. Thulasiram",
+                    "acquired_from": "M. Aarumugam",
+                    "acquisition_mode": "Sale",
+                    "document_number": "1234/1992",
+                    "document_date": "1992-01-20",
+                    "remarks": "",
+                },
+            ],
+        }
+        count = bank.ingest_document("deed.pdf", "SALE_DEED", deed_data)
+        assert count > 0
+
+        # The full chain should be stored
+        chain_facts = bank.get_facts_by_key("ownership_history")
+        assert len(chain_facts) == 1
+        assert isinstance(chain_facts[0]["value"], list)
+        assert len(chain_facts[0]["value"]) == 2
+
+        # Individual recital transfers should be stored
+        transfer_facts = bank.get_facts_by_key("recital_transfer")
+        assert len(transfer_facts) == 2
+        # First entry: Government patta → M. Aarumugam
+        assert "Government patta" in transfer_facts[0]["value"]
+        assert "M. Aarumugam" in transfer_facts[0]["value"]
+        assert "Settlement" in transfer_facts[0]["value"]
+        # Second entry: M. Aarumugam → N. Thulasiram
+        assert "M. Aarumugam" in transfer_facts[1]["value"]
+        assert "N. Thulasiram" in transfer_facts[1]["value"]
+        assert "1234/1992" in transfer_facts[1]["value"]
+
+        # Prior owners should be stored as party facts for identity resolution
+        prior_owners = bank.get_facts_by_key("prior_owner")
+        assert len(prior_owners) == 2
+        names = {f["value"] for f in prior_owners}
+        assert "M. Aarumugam" in names
+        assert "N. Thulasiram" in names
+
+        # previous_ownership should still be stored (backward compat)
+        prev_facts = bank.get_facts_by_key("previous_ownership")
+        assert len(prev_facts) == 1
+
+    def test_ingest_sale_deed_no_ownership_history(self):
+        """Sale deed without ownership_history should still work."""
+        bank = MemoryBank()
+        deed_data = {
+            "document_number": "1111/2020",
+            "seller": [{"name": "A"}],
+            "buyer": [{"name": "B"}],
+            "property": {"survey_number": "100"},
+            "financials": {},
+        }
+        count = bank.ingest_document("deed.pdf", "SALE_DEED", deed_data)
+        assert count > 0
+        # No chain facts beyond basic structure
+        chain_facts = bank.get_facts_by_key("ownership_history")
+        assert len(chain_facts) == 0
+        transfer_facts = bank.get_facts_by_key("recital_transfer")
+        assert len(transfer_facts) == 0
+
     def test_ingest_patta(self):
         bank = MemoryBank()
         patta_data = {
@@ -477,6 +561,25 @@ class TestVerificationContext:
         ctx = bank.get_verification_context()
         assert "CONFLICTS DETECTED" in ctx
 
+    def test_context_includes_references(self):
+        """Reference-category facts (EC numbers, deed numbers, SRO) should appear."""
+        bank = MemoryBank()
+        bank._add_fact("reference", "ec_number", "EC-2024-001", "ec.pdf", "EC")
+        bank._add_fact("reference", "sale_deed_number", "DOC/1234/2020", "deed.pdf", "SALE_DEED")
+        bank._add_fact("reference", "sro", "Chromepet SRO", "deed.pdf", "SALE_DEED")
+        ctx = bank.get_verification_context()
+        assert "--- REFERENCES ---" in ctx
+        assert "EC-2024-001" in ctx
+        assert "DOC/1234/2020" in ctx
+        assert "Chromepet SRO" in ctx
+
+    def test_context_no_references_section_when_empty(self):
+        """REFERENCES section should not appear when no reference facts exist."""
+        bank = MemoryBank()
+        bank._add_fact("property", "survey_number", "311/1", "deed.pdf", "SALE_DEED")
+        ctx = bank.get_verification_context()
+        assert "--- REFERENCES ---" not in ctx
+
 
 # ═══════════════════════════════════════════════════
 # 7. Fuzzy party name matching
@@ -574,3 +677,152 @@ class TestExtentUnitAware:
         extent_conflicts = [c for c in conflicts if c.key == "extent"]
         # These should be approximately equal (within 10%)
         assert len(extent_conflicts) == 0
+
+
+# ═══════════════════════════════════════════════════
+# C1 Fix: Ingest field-name alignment with schemas
+# ═══════════════════════════════════════════════════
+
+class TestIngestFieldAlignment:
+    """Verify that _ingest_* methods correctly read fields from schema-shaped data."""
+
+    @staticmethod
+    def _get_facts(bank: MemoryBank, key: str):
+        return [f for f in bank.facts if f.key == key]
+
+    # ── _name_from_party helper ──
+
+    def test_name_from_party_dict(self):
+        assert MemoryBank._name_from_party({"name": "Raman", "address": "TN"}) == "Raman"
+
+    def test_name_from_party_string(self):
+        assert MemoryBank._name_from_party("Raman") == "Raman"
+
+    def test_name_from_party_none(self):
+        assert MemoryBank._name_from_party(None) is None
+
+    def test_name_from_party_empty_dict(self):
+        assert MemoryBank._name_from_party({}) is None
+
+    # ── Layout Approval: survey_number (not parent_survey_numbers) ──
+
+    def test_ingest_layout_approval_survey_number(self):
+        bank = MemoryBank()
+        bank.ingest_document("layout.pdf", "LAYOUT_APPROVAL", {
+            "approval_number": "LP-001",
+            "authority": "DTCP",
+            "approval_date": "01-01-2020",
+            "survey_number": "123/4",
+        })
+        facts = self._get_facts(bank, "survey_number")
+        assert any(f.value == "123/4" for f in facts)
+
+    # ── POA: registration_number + object parties ──
+
+    def test_ingest_poa_registration_number(self):
+        bank = MemoryBank()
+        bank.ingest_document("poa.pdf", "POA", {
+            "registration_number": "DOC-789",
+            "principal": {"name": "Muthu", "address": "Chennai"},
+            "agent": {"name": "Ravi", "address": "Madurai"},
+            "is_general_or_specific": "specific",
+        })
+        facts = self._get_facts(bank, "poa_document_number")
+        assert any(f.value == "DOC-789" for f in facts)
+        principal_facts = self._get_facts(bank, "poa_principal")
+        assert any(f.value == "Muthu" for f in principal_facts)
+        agent_facts = self._get_facts(bank, "poa_agent")
+        assert any(f.value == "Ravi" for f in agent_facts)
+
+    # ── Will: execution_date + object testator/executor ──
+
+    def test_ingest_will_execution_date(self):
+        bank = MemoryBank()
+        bank.ingest_document("will.pdf", "WILL", {
+            "registration_number": "REG-100",
+            "execution_date": "15-03-2021",
+            "testator": {"name": "Gopal", "age": "75"},
+            "executor": {"name": "Suresh", "address": "TN"},
+            "probate_status": "granted",
+            "beneficiaries": [{"name": "Lakshmi", "relationship": "daughter"}],
+            "witnesses": ["Witness1", "Witness2"],
+        })
+        date_facts = self._get_facts(bank, "will_date")
+        assert any(f.value == "15-03-2021" for f in date_facts)
+        testator_facts = self._get_facts(bank, "testator")
+        assert any(f.value == "Gopal" for f in testator_facts)
+        executor_facts = self._get_facts(bank, "executor")
+        assert any(f.value == "Suresh" for f in executor_facts)
+
+    # ── Partition Deed: registration_number + nested original_property ──
+
+    def test_ingest_partition_deed_nested_fields(self):
+        bank = MemoryBank()
+        bank.ingest_document("partition.pdf", "PARTITION_DEED", {
+            "registration_number": "PD-456",
+            "sro": "Tambaram",
+            "registration_date": "10-06-2019",
+            "original_property": {
+                "survey_number": "55/2A",
+                "village": "Sholinganallur",
+                "total_extent": "5 acres",
+            },
+            "joint_owners": [{"name": "A"}, {"name": "B"}],
+        })
+        deed_facts = self._get_facts(bank, "partition_deed_number")
+        assert any(f.value == "PD-456" for f in deed_facts)
+        survey_facts = self._get_facts(bank, "survey_number")
+        assert any(f.value == "55/2A" for f in survey_facts)
+        village_facts = self._get_facts(bank, "village")
+        assert any(f.value == "Sholinganallur" for f in village_facts)
+
+    # ── Gift Deed: registration_number + object donor/donee + nested survey ──
+
+    def test_ingest_gift_deed_schema_fields(self):
+        bank = MemoryBank()
+        bank.ingest_document("gift.pdf", "GIFT_DEED", {
+            "registration_number": "GD-222",
+            "sro": "Vadavalli",
+            "registration_date": "01-01-2022",
+            "donor": {"name": "Amma", "address": "TN"},
+            "donee": {"name": "Magan", "address": "TN"},
+            "property": {
+                "survey_number": "99/3",
+                "village": "Vadavalli",
+            },
+            "acceptance_clause": True,
+        })
+        deed_facts = self._get_facts(bank, "gift_deed_number")
+        assert any(f.value == "GD-222" for f in deed_facts)
+        donor_facts = self._get_facts(bank, "donor")
+        assert any(f.value == "Amma" for f in donor_facts)
+        donee_facts = self._get_facts(bank, "donee")
+        assert any(f.value == "Magan" for f in donee_facts)
+        survey_facts = self._get_facts(bank, "survey_number")
+        assert any(f.value == "99/3" for f in survey_facts)
+
+    # ── Release Deed: registration_number + object parties + document_type ──
+
+    def test_ingest_release_deed_schema_fields(self):
+        bank = MemoryBank()
+        bank.ingest_document("release.pdf", "RELEASE_DEED", {
+            "registration_number": "RD-333",
+            "sro": "Tambaram",
+            "registration_date": "05-05-2023",
+            "releasing_party": {"name": "SBI Bank", "role": "Bank"},
+            "beneficiary": {"name": "Raman", "role": "borrower"},
+            "original_document": {
+                "document_type": "Mortgage",
+                "number": "MTG-001",
+                "sro": "Tambaram",
+            },
+            "claim_released": "mortgage",
+        })
+        deed_facts = self._get_facts(bank, "release_deed_number")
+        assert any(f.value == "RD-333" for f in deed_facts)
+        party_facts = self._get_facts(bank, "releasing_party")
+        assert any(f.value == "SBI Bank" for f in party_facts)
+        beneficiary_facts = self._get_facts(bank, "release_beneficiary")
+        assert any(f.value == "Raman" for f in beneficiary_facts)
+        doc_type_facts = self._get_facts(bank, "release_original_doc_type")
+        assert any(f.value == "Mortgage" for f in doc_type_facts)

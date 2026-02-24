@@ -28,6 +28,7 @@ import asyncio
 import io
 import logging
 import os
+import random
 import re
 import tempfile
 import time
@@ -43,6 +44,7 @@ from app.config import (
     SARVAM_POLL_INTERVAL,
     SARVAM_TIMEOUT,
     SARVAM_MAX_FILE_MB,
+    SARVAM_CONCURRENCY,
 )
 
 logger = logging.getLogger(__name__)
@@ -109,6 +111,71 @@ def reset_circuit_breaker() -> None:
     with _cb_lock:
         _cb_consecutive_failures = 0
         _cb_disabled_until = 0.0
+
+
+class _SarvamInfraError(Exception):
+    """Raised on 5xx / gateway errors — signals the retry loop to abort immediately.
+
+    These failures (502 Bad Gateway, 503 Service Unavailable, 504 Timeout) are
+    caused by Sarvam's upstream infrastructure and will not recover on retry.
+    Aborting immediately saves up to SARVAM_TIMEOUT × SARVAM_MAX_RETRIES seconds.
+    """
+
+
+class _SarvamRateLimitError(Exception):
+    """Raised on 429 rate-limit errors — signals the retry loop to use longer backoff.
+
+    Unlike infrastructure errors, rate limits are recoverable after waiting.
+    The retry loop uses a longer, jittered backoff (10-15s base) instead of
+    the standard exponential backoff (1-2-4s) to respect the API's rate limit.
+    """
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    """Return True if the exception indicates a 429 rate-limit response.
+
+    Uses the SDK's ``status_code`` attribute (``TooManyRequestsError``) when
+    available, falling back to string matching for non-SDK exceptions.
+    """
+    if getattr(exc, "status_code", None) == 429:
+        return True
+    err_str = str(exc)
+    return "429" in err_str or "rate_limit" in err_str.lower() or "Rate limit" in err_str
+
+
+def _is_infra_error(exc: Exception) -> bool:
+    """Return True if the exception indicates a 5xx / gateway error.
+
+    Uses the SDK's ``status_code`` attribute when available, falling
+    back to string matching for non-SDK exceptions.
+    """
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int) and status >= 500:
+        return True
+    err_str = str(exc)
+    return any(s in err_str for s in ("502", "503", "504", "Bad Gateway", "Service Unavailable", "Gateway Timeout"))
+
+
+def _check_and_raise_error(exc: Exception) -> None:
+    """Re-raise as ``_SarvamRateLimitError`` or ``_SarvamInfraError`` if applicable."""
+    if _is_rate_limit_error(exc):
+        raise _SarvamRateLimitError(str(exc)) from exc
+    if _is_infra_error(exc):
+        raise _SarvamInfraError(str(exc)) from exc
+
+
+# ── Async concurrency limiter ──────────────────────────────────────
+# Limits concurrent Sarvam API sessions to SARVAM_CONCURRENCY (default 1)
+# to prevent 429 rate-limit storms when processing multiple PDFs.
+_sarvam_semaphore: asyncio.Semaphore | None = None
+
+
+def _get_sarvam_semaphore() -> asyncio.Semaphore:
+    """Lazy-init the semaphore (must happen inside a running event loop)."""
+    global _sarvam_semaphore
+    if _sarvam_semaphore is None:
+        _sarvam_semaphore = asyncio.Semaphore(SARVAM_CONCURRENCY)
+    return _sarvam_semaphore
 
 
 # ── File validation ────────────────────────────────────────────────
@@ -230,8 +297,8 @@ def _assess_page_quality(text: str) -> dict:
 async def sarvam_extract_text(file_path: str | Path, *, on_progress=None) -> dict | None:
     """Upload a PDF to Sarvam AI and return extracted text.
 
-    Runs the synchronous ``sarvamai`` SDK in a thread pool to avoid
-    blocking the FastAPI event loop.
+    Uses the native async ``AsyncSarvamAI`` SDK client.  Rate-limit (429)
+    errors do NOT trip the circuit breaker.
 
     Bulletproof guarantees:
       - Returns ``None`` on ANY failure (never raises).
@@ -283,16 +350,15 @@ async def sarvam_extract_text(file_path: str | Path, *, on_progress=None) -> dic
         return None
 
     try:
-        result = await asyncio.to_thread(
-            _sarvam_extract_sync, file_path
-        )
+        sem = _get_sarvam_semaphore()
+        async with sem:
+            result = await _sarvam_extract_async(file_path)
         if result is not None:
             _cb_record_success()
-        else:
-            _cb_record_failure()
         return result
     except Exception as e:
-        _cb_record_failure()
+        if not _is_rate_limit_error(e):
+            _cb_record_failure()
         logger.error(f"HATAD Vision extraction failed for {file_path.name}: {e}", exc_info=True)
         if on_progress:
             try:
@@ -306,25 +372,52 @@ async def sarvam_extract_text(file_path: str | Path, *, on_progress=None) -> dic
         return None
 
 
-def _sarvam_extract_sync(file_path: str | Path) -> dict | None:
-    """Synchronous Sarvam extraction — called via ``asyncio.to_thread``.
+async def _sarvam_extract_async(file_path: Path) -> dict | None:
+    """Async Sarvam extraction with retry loop.
 
-    Retries up to SARVAM_MAX_RETRIES times with exponential backoff.
-    Each individual attempt is fully isolated — any exception in one
-    attempt does not affect the next.
+    Retries up to ``SARVAM_MAX_RETRIES`` times with exponential backoff.
+    Rate-limit (429) errors use a longer jittered backoff and do **not**
+    trip the circuit breaker.  Infrastructure (5xx) errors abort immediately.
     """
-    file_path = Path(file_path)
     max_attempts = SARVAM_MAX_RETRIES + 1
     last_error: str = ""
+    had_non_ratelimit_failure = False
 
     for attempt in range(1, max_attempts + 1):
         try:
-            result = _sarvam_extract_single_attempt(file_path, attempt)
+            result = await _sarvam_single_attempt_async(file_path, attempt)
             if result is not None:
                 return result
             last_error = "extraction returned no data"
+            had_non_ratelimit_failure = True
+        except _SarvamInfraError as e:
+            # 5xx / gateway errors won't recover on retry — abort immediately
+            last_error = str(e)
+            logger.warning(
+                f"Sarvam AI: infrastructure error for {file_path.name} — "
+                f"skipping retries: {e}"
+            )
+            _cb_record_failure()
+            return None
+        except _SarvamRateLimitError as e:
+            # 429 rate limit — recoverable with longer wait (NOT a circuit-breaker event)
+            last_error = str(e)
+            if attempt < max_attempts:
+                # Jittered backoff: 10-15s base × attempt, cap at 60s
+                backoff = min(10 * attempt + random.uniform(0, 5), 60)
+                logger.warning(
+                    f"Sarvam AI: rate limited (429) for {file_path.name} — "
+                    f"waiting {backoff:.0f}s before retry {attempt + 1}/{max_attempts}"
+                )
+                await asyncio.sleep(backoff)
+                continue  # skip the standard backoff below
+            else:
+                logger.warning(
+                    f"Sarvam AI: rate limited on final attempt for {file_path.name}"
+                )
         except Exception as e:
             last_error = str(e)
+            had_non_ratelimit_failure = True
             logger.warning(
                 f"Sarvam AI: attempt {attempt}/{max_attempts} failed for "
                 f"{file_path.name}: {e}"
@@ -337,143 +430,168 @@ def _sarvam_extract_sync(file_path: str | Path) -> dict | None:
                 f"Sarvam AI: retrying {file_path.name} in {backoff}s "
                 f"(attempt {attempt + 1}/{max_attempts})"
             )
-            time.sleep(backoff)
+            await asyncio.sleep(backoff)
 
     logger.error(
         f"Sarvam AI: all {max_attempts} attempts failed for {file_path.name}: {last_error}"
     )
+    # Only trip circuit breaker for non-rate-limit failures
+    if had_non_ratelimit_failure:
+        _cb_record_failure()
     return None
 
 
-def _sarvam_extract_single_attempt(file_path: str | Path, attempt: int = 1) -> dict | None:
-    """Single attempt at Sarvam extraction with per-step error isolation."""
+def _sarvam_extract_sync(file_path: str | Path) -> dict | None:
+    """Backward-compat sync wrapper — runs the async extraction in a new event loop.
+
+    Retries up to SARVAM_MAX_RETRIES times with exponential backoff.
+    Each individual attempt is fully isolated — any exception in one
+    attempt does not affect the next.
+    """
+    return asyncio.run(_sarvam_extract_async(Path(file_path)))
+
+
+async def _sarvam_single_attempt_async(file_path: Path, attempt: int = 1) -> dict | None:
+    """Single async attempt at Sarvam extraction using ``AsyncSarvamAI``.
+
+    Uses the native async SDK client with ``request_options`` for SDK-level
+    retry on transient errors (429, 408, 5xx).  Raises ``_SarvamRateLimitError``
+    or ``_SarvamInfraError`` for the outer retry loop to handle.
+    """
     try:
-        from sarvamai import SarvamAI
+        from sarvamai import AsyncSarvamAI
     except ImportError:
         logger.error("sarvamai package not available")
         return None
 
-    file_path = Path(file_path)
     logger.info(f"Sarvam AI: starting extraction for {file_path.name} (attempt {attempt})")
 
-    # ── Step 1: Create client ──
+    # ── Step 1: Create async client ──
     try:
-        client = SarvamAI(api_subscription_key=SARVAM_API_KEY)
+        client = AsyncSarvamAI(api_subscription_key=SARVAM_API_KEY)
     except Exception as e:
         logger.error(f"Sarvam AI: client creation failed: {e}")
         return None
 
-    # ── Step 2: Create job ──
-    job = None
     try:
-        job = client.document_intelligence.create_job(
-            language=SARVAM_LANGUAGE,
-            output_format="html",
-        )
-        logger.info(f"Sarvam AI: job created — {job.job_id}")
-    except Exception as e:
-        logger.error(f"Sarvam AI: create_job failed for {file_path.name}: {e}")
-        return None
-
-    # ── Step 3: Upload file ──
-    try:
-        job.upload_file(str(file_path))
-        logger.info(f"Sarvam AI: uploaded {file_path.name}")
-    except Exception as e:
-        logger.error(f"Sarvam AI: upload_file failed for {file_path.name}: {e}")
-        _try_cancel_job(job)
-        return None
-
-    # ── Step 4: Start processing ──
-    try:
-        job.start()
-        logger.info(f"Sarvam AI: processing started for {file_path.name}")
-    except Exception as e:
-        logger.error(f"Sarvam AI: job.start() failed for {file_path.name}: {e}")
-        _try_cancel_job(job)
-        return None
-
-    # ── Step 5: Wait for completion ──
-    try:
-        status = job.wait_until_complete(
-            poll_interval=SARVAM_POLL_INTERVAL,
-            timeout=SARVAM_TIMEOUT,
-        )
-    except TimeoutError:
-        logger.error(
-            f"Sarvam AI: job timed out after {SARVAM_TIMEOUT}s for {file_path.name}"
-        )
-        _try_cancel_job(job)
-        return None
-    except Exception as e:
-        logger.error(f"Sarvam AI: wait_until_complete failed for {file_path.name}: {e}")
-        _try_cancel_job(job)
-        return None
-
-    # ── Step 6: Evaluate job state ──
-    state = (
-        getattr(status, "job_state", None)
-        or getattr(status, "state", None)
-        or str(status)
-    )
-    state_lower = str(state).lower()
-    logger.info(f"Sarvam AI: job {job.job_id} finished with state={state}")
-
-    if state_lower == "failed":
-        err = getattr(status, "error_message", None) or "unknown error"
-        logger.error(f"Sarvam AI job failed for {file_path.name}: {err}")
-        return None
-
-    if state_lower not in ("completed", "partiallycompleted"):
-        logger.error(
-            f"Sarvam AI: unexpected state '{state}' after wait for {file_path.name}"
-        )
-        return None
-
-    if state_lower == "partiallycompleted":
+        # ── Step 2: Create job (SDK retries transient errors internally) ──
+        job = None
         try:
-            metrics = job.get_page_metrics()
-            logger.warning(
-                f"Sarvam AI: partial completion for {file_path.name} — "
-                f"{metrics.get('pages_succeeded', '?')}/{metrics.get('total_pages', '?')} pages OK, "
-                f"{metrics.get('pages_failed', '?')} failed"
+            job = await client.document_intelligence.create_job(
+                language=SARVAM_LANGUAGE,
+                output_format="html",
+                request_options={"max_retries": 5},
             )
-        except Exception:
-            logger.warning(f"Sarvam AI: partial completion for {file_path.name}")
+            logger.info(f"Sarvam AI: job created — {job.job_id}")
+        except Exception as e:
+            logger.error(f"Sarvam AI: create_job failed for {file_path.name}: {e}")
+            _check_and_raise_error(e)
+            return None
 
-    # ── Step 7: Download output ZIP ──
-    try:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            output_path = Path(tmp_dir) / "output.zip"
+        # ── Step 3: Upload file ──
+        try:
+            await job.upload_file(str(file_path))
+            logger.info(f"Sarvam AI: uploaded {file_path.name}")
+        except Exception as e:
+            logger.error(f"Sarvam AI: upload_file failed for {file_path.name}: {e}")
+            _check_and_raise_error(e)
+            return None
+
+        # ── Step 4: Start processing ──
+        try:
+            await job.start()
+            logger.info(f"Sarvam AI: processing started for {file_path.name}")
+        except Exception as e:
+            logger.error(f"Sarvam AI: job.start() failed for {file_path.name}: {e}")
+            _check_and_raise_error(e)
+            return None
+
+        # ── Step 5: Wait for completion ──
+        try:
+            status = await job.wait_until_complete(
+                poll_interval=SARVAM_POLL_INTERVAL,
+                timeout=SARVAM_TIMEOUT,
+            )
+        except TimeoutError:
+            logger.error(
+                f"Sarvam AI: job timed out after {SARVAM_TIMEOUT}s for {file_path.name}"
+            )
+            return None
+        except Exception as e:
+            logger.error(f"Sarvam AI: wait_until_complete failed for {file_path.name}: {e}")
+            _check_and_raise_error(e)
+            return None
+
+        # ── Step 6: Evaluate job state ──
+        state = (
+            getattr(status, "job_state", None)
+            or getattr(status, "state", None)
+            or str(status)
+        )
+        state_lower = str(state).lower()
+        logger.info(f"Sarvam AI: job {job.job_id} finished with state={state}")
+
+        if state_lower == "failed":
+            err = getattr(status, "error_message", None) or "unknown error"
+            logger.error(f"Sarvam AI job failed for {file_path.name}: {err}")
+            return None
+
+        if state_lower not in ("completed", "partiallycompleted"):
+            logger.error(
+                f"Sarvam AI: unexpected state '{state}' after wait for {file_path.name}"
+            )
+            return None
+
+        if state_lower == "partiallycompleted":
             try:
-                job.download_output(str(output_path))
-            except Exception as e:
-                logger.error(
-                    f"Sarvam AI: download_output failed for {file_path.name}: {e}"
-                )
-                return None
-
-            if not output_path.exists() or output_path.stat().st_size == 0:
-                logger.error(
-                    f"Sarvam AI: downloaded file is empty/missing for {file_path.name}"
-                )
-                return None
-
-            logger.info(f"Sarvam AI: downloaded output for {file_path.name}")
-
-            # ── Step 8: Extract HTML from ZIP ──
-            html_content = _extract_html_from_zip(output_path)
-            if not html_content:
+                metrics = job.get_page_metrics()
                 logger.warning(
-                    f"Sarvam AI: no HTML content found in output for {file_path.name}"
+                    f"Sarvam AI: partial completion for {file_path.name} — "
+                    f"{metrics.get('pages_succeeded', '?')}/{metrics.get('total_pages', '?')} pages OK, "
+                    f"{metrics.get('pages_failed', '?')} failed"
                 )
-                return None
+            except Exception:
+                logger.warning(f"Sarvam AI: partial completion for {file_path.name}")
 
-            # ── Step 8b: Also extract per-page metadata JSON (text fallback) ──
-            metadata_texts = _extract_metadata_page_texts(output_path)
-    except Exception as e:
-        logger.error(f"Sarvam AI: output processing failed for {file_path.name}: {e}")
-        return None
+        # ── Step 7: Download output ZIP ──
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                output_path = Path(tmp_dir) / "output.zip"
+                try:
+                    await job.download_output(str(output_path))
+                except Exception as e:
+                    logger.error(
+                        f"Sarvam AI: download_output failed for {file_path.name}: {e}"
+                    )
+                    return None
+
+                if not output_path.exists() or output_path.stat().st_size == 0:
+                    logger.error(
+                        f"Sarvam AI: downloaded file is empty/missing for {file_path.name}"
+                    )
+                    return None
+
+                logger.info(f"Sarvam AI: downloaded output for {file_path.name}")
+
+                # ── Step 8: Extract HTML from ZIP ──
+                html_content = _extract_html_from_zip(output_path)
+                if not html_content:
+                    logger.warning(
+                        f"Sarvam AI: no HTML content found in output for {file_path.name}"
+                    )
+                    return None
+
+                # ── Step 8b: Also extract per-page metadata JSON (text fallback) ──
+                metadata_texts = _extract_metadata_page_texts(output_path)
+        except Exception as e:
+            logger.error(f"Sarvam AI: output processing failed for {file_path.name}: {e}")
+            return None
+    finally:
+        # Best-effort cleanup of the async HTTP client
+        try:
+            await client._client_wrapper.httpx_client.httpx_client.aclose()
+        except Exception:
+            pass
 
     # ── Step 9: Parse HTML → per-page text ──
     try:
@@ -501,6 +619,11 @@ def _sarvam_extract_single_attempt(file_path: str | Path, attempt: int = 1) -> d
 
     # ── Step 10: Build result dict ──
     return _build_result(file_path, page_texts)
+
+
+def _sarvam_extract_single_attempt(file_path: str | Path, attempt: int = 1) -> dict | None:
+    """Backward-compat sync wrapper for single extraction attempt."""
+    return asyncio.run(_sarvam_single_attempt_async(Path(file_path), attempt))
 
 
 def _try_cancel_job(job) -> None:

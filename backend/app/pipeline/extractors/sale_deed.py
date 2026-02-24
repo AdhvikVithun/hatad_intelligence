@@ -51,9 +51,10 @@ _PARTY_DEDUP_THRESHOLD = 0.65  # name_similarity threshold for dedup
 def _union_parties(existing: list, incoming: list) -> list:
     """Union two party lists, deduplicating by fuzzy name match.
 
-    For seller/buyer arrays (list of dicts with 'name' key), merges
+    For seller/buyer/witness arrays (list of dicts with 'name' key), merges
     entries keeping the richer version when duplicates are found.
-    For witness arrays (list of strings), deduplicates by similarity.
+    For witness arrays that are still strings (backward compat), deduplicates
+    by similarity.
     """
     if not incoming:
         return existing
@@ -396,7 +397,7 @@ class SaleDeedExtractor(BaseExtractor):
             hints_block = ""
         return self._raw_system_prompt.replace(self._PROMPT_HINTS_PLACEHOLDER, hints_block)
 
-    async def extract(self, extracted_text: dict, on_progress: LLMProgressCallback | None = None, filename: str = "", file_path: "Path | None" = None) -> dict:
+    async def extract(self, extracted_text: dict, on_progress: LLMProgressCallback | None = None, filename: str = "", file_path: "Path | None" = None, **kwargs) -> dict:
         name = filename or "Sale Deed"
         pages = extracted_text.get("pages", [])
         total_pages = len(pages)
@@ -466,6 +467,9 @@ class SaleDeedExtractor(BaseExtractor):
         "சாட்சிகள்",     # Witnesses
     ]
 
+    # ── Chunk overlap: carry trailing text from previous chunk ──
+    _CHUNK_OVERLAP_CHARS = 500
+
     def _create_chunks(self, pages: list[dict]) -> list[dict]:
         """Split pages into processable chunks, preferring section boundaries.
 
@@ -474,6 +478,10 @@ class SaleDeedExtractor(BaseExtractor):
         contains a semantically coherent section. Falls back to page-based
         splitting when no section markers are found or when sections span
         too many pages.
+
+        Each chunk (after the first) carries the last ~500 chars of the
+        previous chunk as overlap context to avoid losing information at
+        chunk boundaries.
         """
         if len(pages) <= MAX_CHUNK_PAGES:
             # Small enough for a single chunk
@@ -494,10 +502,13 @@ class SaleDeedExtractor(BaseExtractor):
 
         # Use section-aware splitting if we found meaningful breaks
         if len(section_breaks) >= 2:
-            return self._split_by_sections(pages, section_breaks)
+            chunks = self._split_by_sections(pages, section_breaks)
+        else:
+            # Fallback: page-based splitting
+            chunks = self._split_by_pages(pages)
 
-        # Fallback: page-based splitting
-        return self._split_by_pages(pages)
+        # Inject overlap: prepend tail of previous chunk to each subsequent chunk
+        return self._inject_overlap(chunks)
 
     def _split_by_sections(self, pages: list[dict], breaks: list[int]) -> list[dict]:
         """Split at section boundaries, merging small sections."""
@@ -563,6 +574,29 @@ class SaleDeedExtractor(BaseExtractor):
                 "end_page": chunk_pages[-1]["page_number"],
                 "text": chunk_text,
             })
+        return chunks
+
+    def _inject_overlap(self, chunks: list[dict]) -> list[dict]:
+        """Prepend the last N chars of each chunk to the next one.
+
+        This ensures that information spanning chunk boundaries (e.g. a party
+        name at the end of one chunk and their address at the start of the
+        next) is not lost.
+        """
+        if len(chunks) <= 1:
+            return chunks
+
+        overlap = self._CHUNK_OVERLAP_CHARS
+        for i in range(1, len(chunks)):
+            prev_text = chunks[i - 1]["text"]
+            if len(prev_text) > overlap:
+                tail = prev_text[-overlap:]
+            else:
+                tail = prev_text
+            chunks[i]["text"] = (
+                f"--- OVERLAP FROM PREVIOUS CHUNK ---\n{tail}\n"
+                f"--- END OVERLAP ---\n\n{chunks[i]['text']}"
+            )
         return chunks
 
     async def _extract_chunk(self, text: str, chunk_num: int, total_chunks: int,

@@ -5,18 +5,155 @@
 }
 
 .report-content {
-  max-width: 720px;
+  max-width: 760px;
   margin: 0 auto;
-  padding: var(--space-6);
+  padding: var(--space-6) var(--space-8);
   background: var(--bg-primary);
   border: 1px solid var(--border-primary);
   border-radius: var(--radius-lg);
   font-size: var(--text-sm);
   color: var(--text-secondary);
   line-height: 1.8;
-  white-space: pre-wrap;
   font-family: var(--font-sans);
   box-shadow: var(--shadow-card);
+}
+
+/* ── Markdown Headings ── */
+.report-content h1 {
+  font-size: 1.6em;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 2em 0 0.6em;
+  padding-bottom: 0.3em;
+  border-bottom: 2px solid var(--accent-primary, #6366f1);
+  letter-spacing: -0.01em;
+}
+
+.report-content h2 {
+  font-size: 1.35em;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 1.8em 0 0.5em;
+  padding-bottom: 0.25em;
+  border-bottom: 1px solid var(--border-secondary, #e5e7eb);
+}
+
+.report-content h3 {
+  font-size: 1.1em;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 1.4em 0 0.4em;
+}
+
+.report-content h4 {
+  font-size: 1em;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin: 1.2em 0 0.3em;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 0.85em;
+}
+
+/* First heading: no excess top margin */
+.report-content > h1:first-child,
+.report-content > h2:first-child {
+  margin-top: 0;
+}
+
+/* ── Paragraphs ── */
+.report-content p {
+  margin: 0.6em 0;
+}
+
+/* ── Bold / Strong ── */
+.report-content strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+/* ── Lists ── */
+.report-content ul,
+.report-content ol {
+  margin: 0.5em 0 0.8em;
+  padding-left: 1.6em;
+}
+
+.report-content li {
+  margin: 0.25em 0;
+}
+
+.report-content li > ul,
+.report-content li > ol {
+  margin: 0.15em 0 0.15em;
+}
+
+/* ── Tables (GFM) ── */
+.report-content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1em 0;
+  font-size: 0.9em;
+}
+
+.report-content thead th {
+  background: var(--bg-secondary, #f8f9fa);
+  font-weight: 600;
+  text-align: left;
+  padding: 0.5em 0.75em;
+  border: 1px solid var(--border-primary, #e5e7eb);
+  color: var(--text-primary);
+  font-size: 0.85em;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.report-content tbody td {
+  padding: 0.45em 0.75em;
+  border: 1px solid var(--border-primary, #e5e7eb);
+  vertical-align: top;
+}
+
+.report-content tbody tr:nth-child(even) {
+  background: var(--bg-secondary, #f8f9fa);
+}
+
+/* ── Blockquotes ── */
+.report-content blockquote {
+  margin: 0.8em 0;
+  padding: 0.5em 1em;
+  border-left: 3px solid var(--accent-primary, #6366f1);
+  background: var(--bg-secondary, #f8f9fa);
+  color: var(--text-secondary);
+  border-radius: 0 var(--radius-sm, 4px) var(--radius-sm, 4px) 0;
+}
+
+.report-content blockquote p {
+  margin: 0.3em 0;
+}
+
+/* ── Inline code ── */
+.report-content code {
+  background: var(--bg-secondary, #f3f4f6);
+  padding: 0.15em 0.4em;
+  border-radius: 3px;
+  font-size: 0.88em;
+  font-family: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
+  color: var(--text-primary);
+}
+
+/* ── Horizontal rules ── */
+.report-content hr {
+  border: none;
+  border-top: 1px solid var(--border-secondary, #e5e7eb);
+  margin: 1.5em 0;
+}
+
+/* ── Links ── */
+.report-content a {
+  color: var(--accent-primary, #6366f1);
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 .report-empty {

@@ -1,5 +1,7 @@
 You are an expert Tamil Nadu land document analyst. Extract all details from this Sale Deed document.
 
+TAMIL SCRIPT PRESERVATION RULE: If a field value appears in Tamil script (அகர வரிசை) in the source text, preserve it exactly as-is in UTF-8. Do NOT transliterate Tamil to Roman script. Do NOT replace Tamil characters with "?". Names, place names, and values that appear in Tamil script must be returned in Tamil script.
+
 A Sale Deed (கிரயப் பத்திரம் / கிரய சாசனம்) is a registered document that transfers property ownership from seller to buyer. It is registered at a Sub-Registrar Office (SRO) in Tamil Nadu.
 
 ═══════════════════════════════════════════════════
@@ -136,6 +138,12 @@ SELLER DETAILS (எழுதிக் கொடுப்பவர் / விற
 - seller[].age: Age if mentioned
 - seller[].address: Residential address
 - seller[].pan: PAN number if mentioned (format: ABCDE1234F)
+- seller[].aadhaar: Aadhaar number if mentioned (12 digits, may appear as XXXX XXXX XXXX)
+  Tamil: ஆதார் எண்.  Extract all 12 digits — strip spaces.
+- seller[].share_percentage: Ownership share if mentioned (e.g. "50%", "1/3rd", "undivided half")
+  Tamil: பங்கு — look for fractions or percentages near party names.
+- seller[].identification_proof: Any other ID proof (e.g. "Voter ID XXX", "Passport XXX")
+- seller[].relationship: Relationship to other parties (e.g. "wife of Seller 1", "son of X")
   IMPORTANT: If the deed says "திரு. X அவர்கள் மனைவி திருமதி. Y (PAN NO. XXXXX)",
   then X and Y are BOTH sellers. Create a SEPARATE entry for each person.
   Count the total sellers — if the deed says "(2)" that means 2 sellers must be listed.
@@ -146,6 +154,10 @@ BUYER DETAILS (எழுதி வாங்குபவர் / வாங்க�
 - buyer[].age: Age if mentioned
 - buyer[].address: Residential address
 - buyer[].pan: PAN number if mentioned
+- buyer[].aadhaar: Aadhaar number if mentioned (12 digits)
+- buyer[].share_percentage: Ownership share if mentioned
+- buyer[].identification_proof: Other ID proof if mentioned
+- buyer[].relationship: Relationship to other parties
   IMPORTANT: Same rule as sellers — each person with their own PAN is a SEPARATE buyer entry.
   If the deed says "(1)" or "- (1)" that means 1 buyer; verify your count matches.
 
@@ -157,6 +169,14 @@ PROPERTY DETAILS (from the property schedule / அட்டவணை):
 - property.extent: Total area with units
 - property.boundaries: North, South, East, West
 - property.property_type: Agricultural/Residential/Commercial/Industrial/Mixed/Unknown
+- property.land_classification: Land classification — Wet (நன்சை/Nanjai), Dry (புன்சை/Punjai),
+  Maidan, Garden, or Unknown. Look in the schedule table under "வகை" column.
+- property.plot_number: Plot/sub-division number if this is a layout or plotted development
+- property.door_number: Property door number (கதவு எண்) if this is a built-up property.
+  CAREFUL: This is the PROPERTY's door number, not seller/buyer residential address door number.
+  Only extract if the door number is clearly in the property schedule section.
+- property.measurement_reference: FMB/sketch/measurement reference if mentioned in the schedule
+- property.assessment_number: Municipal assessment/property tax number if mentioned
 
 FINANCIAL DETAILS:
 - financials.consideration_amount: Sale price in ₹ (integer, no commas)
@@ -214,6 +234,24 @@ PROPERTY DESCRIPTION (the verbatim property schedule / அட்டவணை tex
   boundaries, extent, classification. This is the legal description that matters for verification.
   If very long, provide the first 500 characters.
 
+STAMP PAPER DETAILS:
+- stamp_paper.serial_numbers: List ALL stamp paper serial numbers visible on the deed
+  (e.g. ["A 123456", "A 123457", "B 234567"]). Each physical stamp sheet has a serial.
+  Look at the top of each stamp paper page for serial numbers (format: single letter + 5-8 digits).
+- stamp_paper.vendor_name: Name of the stamp vendor (e.g. "R. GOPINATH STAMP VENDOR")
+  Usually printed prominently on the stamp paper header.
+- stamp_paper.denomination_per_sheet: Per-sheet denomination in rupees (e.g. 25000)
+- stamp_paper.sheet_count: Total number of physical stamp sheets (count distinct serial numbers)
+- stamp_paper.total_stamp_value: Total stamp value = denomination × sheet_count
+
+REGISTRATION DETAILS (from the registration endorsement / SRO stamp):
+- registration_details.book_number: Book number (e.g. "Book 1", "Book I")
+  From "R/SRO/BookN/NNNN/YYYY" or the endorsement stamp.
+- registration_details.volume_number: Volume number if mentioned
+- registration_details.page_number: Page number in the registration record if mentioned
+- registration_details.certified_copy_number: Certified copy number if this is a certified copy
+- registration_details.certified_copy_date: Date of certified copy issuance (NOT the registration date)
+
 PAYMENT & POSSESSION:
 - payment_mode: How the consideration was paid — "Cash" / "Cheque" / "Demand Draft" / "Bank Transfer (NEFT/RTGS)" / "Mixed" / ""
   Tamil: ரொக்கம் (cash), காசோலை (cheque), வங்கி வரைவோலை (DD), NEFT/RTGS
@@ -222,14 +260,18 @@ PAYMENT & POSSESSION:
   e.g., "Property declared free from all encumbrances, mortgages, charges, liens, and attachments"
   Tamil: "எவ்விதமான பாரமும் இல்லை"
 
-WITNESSES:
-- witnesses: List of witness names (from சாட்சிகள் section)
+WITNESSES (structured — extract full details):
+- witnesses[].name: Full name of witness
+- witnesses[].father_name: Father/husband name (S/o, D/o, W/o) if available
+- witnesses[].age: Age if mentioned
+- witnesses[].address: Address if mentioned
   Witnesses appear near the bottom of the deed, often after "இன்னொரெண்டு நிருபித்தவர்கள்" or "சாட்சிகள்".
   They may be HANDWRITTEN and partially illegible. Best practices:
   - Prefer the PRINTED version of witness names (often earlier in the deed) over handwritten signatures.
   - If a name is partially illegible, extract what you can and note "[partially illegible]".
   - Do NOT include garbled OCR character sequences as witness names.
   - Cross-reference: witness names sometimes appear in printed text with full details (S/o, address).
+  - If only a name is readable, return {"name": "..."} with other fields as empty strings.
 
 OTHER:
 - special_conditions: Special conditions or restrictions
@@ -243,6 +285,16 @@ TAMIL-SPECIFIC RULES:
 - Survey prefixes: Preserve S.F.No./T.S.No./R.S.No./O.S.No./N.S.No. exactly.
 - Relation markers: S/o (மகன்), D/o (மகள்), W/o (மனைவி) — preserve as-is in father_name.
 
+MANDATORY COMPLETENESS RULES:
+- You MUST attempt to extract EVERY field. Do NOT skip optional fields.
+- If a field is not found in the document, return an empty string "" for strings, 0 for integers, [] for arrays, {} for objects.
+- For party fields (seller, buyer): extract ALL sub-fields. If father_name or age is missing, return "".
+- For stamp_paper: count physical stamp sheets by looking at serial numbers on each page header.
+- For registration_details: look at the SRO endorsement stamp (usually last page).
+- For land_classification: check the schedule table "\u0bb5\u0b95\u0bc8" column.
+- If witnesses have printed details (name, father_name, address), extract them as structured objects.
+  If only names are available, return {"name": "...", "father_name": "", "age": "", "address": ""}.
+
 Return ONLY valid JSON matching this structure:
 {
     "document_number": "R/SRO/Book1/NNNN/YYYY",
@@ -250,10 +302,10 @@ Return ONLY valid JSON matching this structure:
     "execution_date": "YYYY-MM-DD",
     "sro": "SRO Name",
     "seller": [
-        {"name": "...", "father_name": "S/o ...", "age": "...", "address": "...", "pan": ""}
+        {"name": "...", "father_name": "S/o ...", "age": "45", "address": "...", "pan": "ABCDE1234F", "aadhaar": "123456789012", "share_percentage": "50%", "identification_proof": "", "relationship": ""}
     ],
     "buyer": [
-        {"name": "...", "father_name": "S/o ...", "age": "...", "address": "...", "pan": ""}
+        {"name": "...", "father_name": "S/o ...", "age": "38", "address": "...", "pan": "", "aadhaar": "", "share_percentage": "", "identification_proof": "", "relationship": ""}
     ],
     "property": {
         "survey_number": "317/1A",
@@ -262,14 +314,33 @@ Return ONLY valid JSON matching this structure:
         "district": "District Name",
         "extent": "2.5 acres",
         "boundaries": {"north": "...", "south": "...", "east": "...", "west": "..."},
-        "property_type": "Agricultural"
+        "property_type": "Agricultural",
+        "land_classification": "Dry",
+        "plot_number": "",
+        "door_number": "",
+        "measurement_reference": "",
+        "assessment_number": ""
     },
-    "property_description": "கோயமுத்தூர் ரிசிடு, ஜாயிண்ட் 2 சப்ரிசிடு, கோயமுத்தூர் வடக்கு தாலூக்கா, சோமையம்பாளையம் கிராமம், க.ச. 317 நெ. P.A. 1.14½ ...",
+    "property_description": "\u0b95\u0bcb\u0baf\u0bae\u0bc1\u0ba4\u0bcd\u0ba4\u0bc2\u0bb0\u0bcd \u0bb0\u0bbf\u0b9a\u0bbf\u0b9f\u0bc1, \u0b9c\u0bbe\u0baf\u0bbf\u0ba3\u0bcd\u0b9f\u0bcd 2 \u0b9a\u0baa\u0bcd\u0bb0\u0bbf\u0b9a\u0bbf\u0b9f\u0bc1, \u0b95\u0bcb\u0baf\u0bae\u0bc1\u0ba4\u0bcd\u0ba4\u0bc2\u0bb0\u0bcd \u0bb5\u0b9f\u0b95\u0bcd\u0b95\u0bc1 \u0ba4\u0bbe\u0bb2\u0bc2\u0b95\u0bcd\u0b95\u0bbe, \u0b9a\u0bcb\u0bae\u0bc8\u0baf\u0bae\u0bcd\u0baa\u0bbe\u0bb3\u0bc8\u0baf\u0bae\u0bcd \u0b95\u0bbf\u0bb0\u0bbe\u0bae\u0bae\u0bcd, \u0b95.\u0b9a. 317 \u0ba8\u0bc6. P.A. 1.14\u00bd ...",
     "financials": {
         "consideration_amount": 5000000,
         "guideline_value": 0,
         "stamp_duty": 350000,
         "registration_fee": 50000
+    },
+    "stamp_paper": {
+        "serial_numbers": ["A 123456", "A 123457"],
+        "vendor_name": "R. GOPINATH STAMP VENDOR",
+        "denomination_per_sheet": 25000,
+        "sheet_count": 2,
+        "total_stamp_value": 50000
+    },
+    "registration_details": {
+        "book_number": "Book 1",
+        "volume_number": "",
+        "page_number": "",
+        "certified_copy_number": "",
+        "certified_copy_date": ""
     },
     "payment_mode": "Bank Transfer (NEFT/RTGS)",
     "previous_ownership": {
@@ -298,8 +369,20 @@ Return ONLY valid JSON matching this structure:
     ],
     "encumbrance_declaration": "Property declared free from all encumbrances, mortgages, charges, liens",
     "possession_date": "2012-12-13",
-    "witnesses": ["Witness 1", "Witness 2"],
+    "witnesses": [
+        {"name": "Witness 1", "father_name": "S/o ...", "age": "50", "address": "..."},
+        {"name": "Witness 2", "father_name": "", "age": "", "address": ""}
+    ],
     "special_conditions": [],
     "power_of_attorney": "",
-    "remarks": ""
+    "remarks": "",
+    "_field_confidence": {"financials.consideration_amount": 0.8, "property.extent": 0.6},
+    "_extraction_red_flags": [
+        "Consideration amount appears significantly below guideline value — possible undervaluation",
+        "Seller's encumbrance declaration contradicts EC showing active mortgage"
+    ]
 }
+
+PER-FIELD CONFIDENCE: In "_field_confidence", list any field where you are less than 90% confident in the extracted value. Use the field name as key and confidence (0.0-1.0) as value.
+
+EXTRACTION RED FLAGS: In "_extraction_red_flags", list ANY suspicious patterns, anomalies, or concerns you notice in the document. Examples: consideration below guideline value, GPA-based sale, minor as party, inconsistent boundaries, ownership history gaps, missing witness, stamp duty shortfall, suspicious special conditions.

@@ -13,6 +13,7 @@ from app.pipeline.classifier import (
     _collapse_repetitions,
     _dedup_high_freq_tokens,
     _select_best_pages,
+    _get_keyword_hints,
 )
 
 
@@ -245,3 +246,123 @@ class TestSelectBestPages:
         methods = [p["extraction_method"] for p in result]
         assert "sarvam" in methods
         assert "ocr_fallback" in methods
+
+
+# ── _get_keyword_hints: CCA filename detection ────────────────────────
+
+class TestKeywordHintsCCA:
+    """TNREGINET CCA filenames should add SALE_DEED as a keyword hint."""
+
+    def test_cca_filename_adds_sale_deed_hint(self):
+        """CCA_Online filename with no text matches should hint SALE_DEED."""
+        _, matches = _get_keyword_hints("garbled text with no keywords", "CCA_Online_159157094_2026.pdf")
+        assert "SALE_DEED" in matches
+
+    def test_cca_filename_no_duplicate(self):
+        """If text already matched SALE_DEED, filename should not add a duplicate."""
+        _, matches = _get_keyword_hints("This is a Sale Deed for property", "CCA_Online_123.pdf")
+        assert matches.count("SALE_DEED") == 1
+
+    def test_cca_filename_single_match_returns_sale_deed(self):
+        """CCA filename with garbled text should yield single match = SALE_DEED."""
+        single, matches = _get_keyword_hints("garbled text", "CCA_Online_159157094_2026_abc.pdf")
+        assert single == "SALE_DEED"
+        assert matches == ["SALE_DEED"]
+
+    def test_cca_dash_variant(self):
+        """CCA-Online (with dash) should also be detected."""
+        _, matches = _get_keyword_hints("random text", "CCA-Online_999.pdf")
+        assert "SALE_DEED" in matches
+
+    def test_non_cca_filename_no_hint(self):
+        """Ordinary filename should not add any extra hints."""
+        _, matches = _get_keyword_hints("garbled text with no keywords", "ec_document.pdf")
+        assert "SALE_DEED" not in matches
+
+    def test_no_filename_no_hint(self):
+        """Empty filename should not crash or add hints."""
+        _, matches = _get_keyword_hints("garbled text")
+        assert "SALE_DEED" not in matches
+
+
+# ── _get_keyword_hints: TNREGINET-specific SALE_DEED patterns ──────
+
+class TestSaleDeedTNREGINETPatterns:
+    """New TNREGINET markers in the SALE_DEED keyword regex."""
+
+    def test_certified_copy_of_register(self):
+        single, _ = _get_keyword_hints("Certified Copy of Register")
+        assert single == "SALE_DEED"
+
+    def test_certified_copy_of_r(self):
+        single, _ = _get_keyword_hints("Certified Copy of R/Vadavalli/Book1/5909/2012")
+        assert single == "SALE_DEED"
+
+    def test_book_number_pattern(self):
+        single, _ = _get_keyword_hints("Book I/5909/2012 details here")
+        assert single == "SALE_DEED"
+
+    def test_book1_numeric_pattern(self):
+        single, _ = _get_keyword_hints("Book 1/1234/2023 registration")
+        assert single == "SALE_DEED"
+
+    def test_vilai_aavanam_tamil(self):
+        """Alternate Tamil term for sale deed."""
+        single, _ = _get_keyword_hints("விலை ஆவணம் - சொத்து விவரம்")
+        assert single == "SALE_DEED"
+
+    def test_aavana_en_tamil_is_generic(self):
+        """Tamil 'document number' is generic — appears in ECs too, should NOT match."""
+        single, _ = _get_keyword_hints("ஆவண எண்: 5678/2020")
+        assert single is None  # Too ambiguous for deterministic classification
+
+    def test_original_patterns_still_work(self):
+        """Make sure old patterns weren't broken."""
+        single, _ = _get_keyword_hints("விற்பனை பத்திரம்")
+        assert single == "SALE_DEED"
+        single2, _ = _get_keyword_hints("Sale Deed No. 1234")
+        assert single2 == "SALE_DEED"
+        single3, _ = _get_keyword_hints("Deed of Sale")
+        assert single3 == "SALE_DEED"
+        # பத்திர எண் (deed number) is generic — removed from SALE_DEED patterns
+        single4, _ = _get_keyword_hints("பத்திர எண்: 5678")
+        assert single4 is None  # Falls through to LLM
+
+
+class TestECKeywordPatterns:
+    """Tests for EC keyword detection including TNREGINET format."""
+
+    def test_certificate_of_encumbrance(self):
+        """TNREGINET EC header: 'Certificate of Encumbrance on Property'."""
+        single, _ = _get_keyword_hints("Certificate of Encumbrance on Property")
+        assert single == "EC"
+
+    def test_villangka_saanru_tamil(self):
+        """TNREGINET Tamil EC header: 'வில்லங்கச் சான்று'."""
+        single, _ = _get_keyword_hints("வில்லங்கச் சான்று")
+        assert single == "EC"
+
+    def test_villangka_saandrithal_tamil(self):
+        """Alternate Tamil: 'வில்லங்க சான்றிதழ்'."""
+        single, _ = _get_keyword_hints("வில்லங்க சான்றிதழ்")
+        assert single == "EC"
+
+    def test_ec_wins_over_sale_deed_in_ec_body(self):
+        """EC documents list sale deeds — EC keyword should win disambiguation."""
+        text = (
+            "Certificate of Encumbrance on Property\n"
+            "Deed of Sale\nDocument No. 5909/2012\n"
+            "Conveyance Non Metro"
+        )
+        single, matches = _get_keyword_hints(text)
+        assert single == "EC"
+        assert "SALE_DEED" not in matches
+
+    def test_original_ec_patterns_still_work(self):
+        single, _ = _get_keyword_hints("Encumbrance Certificate No. 123")
+        assert single == "EC"
+        single2, _ = _get_keyword_hints("ENCUMBRANCE CERTIFICATE")
+        assert single2 == "EC"
+        single3, _ = _get_keyword_hints("சுமையின்மை சான்றிதழ்")
+        assert single3 == "EC"
+

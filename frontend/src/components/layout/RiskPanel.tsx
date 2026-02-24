@@ -1,5 +1,6 @@
-import type { PipelineState, CheckResult } from '../../types';
+import type { PipelineState, CheckResult, ChatMessage } from '../../types';
 import { RiskGauge } from '../common/RiskGauge';
+import { ChatPanel } from './ChatPanel';
 import './RiskPanel.css';
 
 /* Map raw DET_ codes (sometimes emitted by LLM in red_flags) to friendly text */
@@ -73,15 +74,26 @@ interface Props {
   transactions: any[];
   pipeline: PipelineState;
   formatDuration: (s: number) => string;
+  // Chat props
+  chatOpen: boolean;
+  onToggleChat: () => void;
+  chatMessages: ChatMessage[];
+  chatStreaming: boolean;
+  chatThinking: string;
+  chatError: string | null;
+  onChatSend: (text: string) => void;
+  onChatClear: () => void;
 }
 
 export function RiskPanel({
   processing, session, riskScore, riskBand, riskColor,
   elapsed, files, checks, passCount, failCount, warnCount,
   redFlags, transactions, pipeline, formatDuration,
+  chatOpen, onToggleChat, chatMessages, chatStreaming,
+  chatThinking, chatError, onChatSend, onChatClear,
 }: Props) {
   return (
-    <aside className="risk-panel">
+    <aside className={`risk-panel${chatOpen ? ' risk-panel--expanded' : ''}`}>
       <div className="risk-panel__header">
         <span className="material-icons risk-panel__header-icon">shield</span>
         <span className="risk-panel__title">Risk Assessment</span>
@@ -193,6 +205,29 @@ export function RiskPanel({
           </div>
         );
       })()}
+
+      {/* Ask HATAD button — shown when analysis complete and chat not open */}
+      {session && !processing && !chatOpen && (
+        <div className="risk-panel__chat-trigger">
+          <button className="risk-panel__chat-btn" onClick={onToggleChat}>
+            <span className="material-icons" style={{ fontSize: 16 }}>forum</span>
+            Ask HATAD
+          </button>
+        </div>
+      )}
+
+      {/* Chat panel — fills remaining space when open */}
+      {chatOpen && (
+        <ChatPanel
+          messages={chatMessages}
+          streaming={chatStreaming}
+          thinking={chatThinking}
+          error={chatError}
+          onSend={onChatSend}
+          onClear={onChatClear}
+          onClose={onToggleChat}
+        />
+      )}
     </aside>
   );
 }

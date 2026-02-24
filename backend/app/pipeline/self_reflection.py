@@ -99,26 +99,39 @@ async def run_self_reflection(
     # Skip system-generated fallback checks (errors/skipped) — they are
     # not LLM outputs and confuse the reflection model
     compact_checks = []
+    deterministic_checks = []
     for check in all_checks:
         code = check.get("rule_code", "")
         if code.endswith("_ERROR") or code.endswith("_SKIPPED"):
             continue
-        # Also skip deterministic checks (source=deterministic) — pure Python, no LLM to audit
-        if check.get("source") == "deterministic":
-            continue
-        compact_checks.append({
+        entry = {
             "rule_code": code,
             "rule_name": check.get("rule_name", ""),
             "severity": check.get("severity", ""),
             "status": check.get("status", ""),
             "explanation": check.get("explanation", "")[:600],
             "evidence": check.get("evidence", "")[:800],
-        })
+        }
+        # Separate deterministic checks for cross-reference context
+        if check.get("source") == "deterministic":
+            deterministic_checks.append(entry)
+        else:
+            compact_checks.append(entry)
+
+    # Build prompt with both LLM and deterministic results
+    det_section = ""
+    if deterministic_checks:
+        det_section = (
+            f"\n\nDETERMINISTIC CHECK RESULTS (automated/rule-based — use for cross-referencing "
+            f"with LLM checks above, especially for Tamil↔English name/location matching issues):\n"
+            f"{json.dumps(deterministic_checks, indent=2, ensure_ascii=False)}"
+        )
 
     prompt = (
         f"Review these {len(compact_checks)} verification check results for internal "
         f"contradictions, status-evidence mismatches, and cross-group inconsistencies.\n\n"
         f"CHECK RESULTS:\n{json.dumps(compact_checks, indent=2, ensure_ascii=False)}"
+        f"{det_section}"
     )
 
     try:
@@ -187,6 +200,14 @@ def apply_amendments(all_checks: list[dict], amendments: list[dict]) -> int:
             continue
 
         check = checks_by_code[code]
+
+        # Never amend deterministic checks — they are rule-based ground truth
+        if check.get("source") == "deterministic":
+            logger.warning(
+                f"Self-reflection: blocked amendment of deterministic check '{code}'"
+            )
+            continue
+
         old_status = check.get("status", "")
 
         # Only apply if status actually changes

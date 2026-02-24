@@ -35,6 +35,8 @@ EVIDENCE FORMAT — Every check MUST include evidence with:
 If a check is NOT_APPLICABLE, evidence must explain WHY (e.g. "Only one sale transaction found — no flipping pattern possible.").
 If you find no relevant data, say so explicitly — do NOT invent or assume facts.
 
+IMPORTANT: Always use the ACTUAL filenames from the uploaded documents in your evidence citations, NOT generic placeholders like "EC_Document.pdf" or "SaleDeed.pdf". The real filenames are provided in the document data below.
+
 ═══ FEW-SHOT EXAMPLES ═══
 
 Below are GOLD-STANDARD examples of correct check results. Study the reasoning, evidence format, and status assignment carefully.
@@ -103,6 +105,24 @@ WRONG — Marking chain as broken when the EC claimant and sale deed seller have
 WRONG — Flagging a seller below age 10 in a historic transaction:
   "Seller aged 5 years in a 1965 partition deed — AGE_FRAUD FAIL."
   WHY THIS IS WRONG: Partition deeds and settlement deeds can name children as recipients/beneficiaries. A 5-year-old listed as a party in a partition is as a RECIPIENT, not as a seller executing a sale. Only flag minors who are executants (sellers) in sale deeds.
+
+═══ RECITAL vs EC CROSS-CHECK ═══
+
+IMPORTANT — If a Sale Deed is available, its RECITALS (ownership_history / "story of the land")
+provide an INDEPENDENT account of how the property changed hands before the current sale.
+You MUST cross-reference the recital chain against the EC transaction log:
+
+1. Call `query_knowledge_base` with query "ownership history recital transfer" to retrieve
+   the sale deed's recital chain (stored as "recital_transfer" and "ownership_history" facts).
+2. For EACH transfer in the recital chain, verify it appears in the EC as a matching transaction
+   (same parties, same approximate date, same deed number if available).
+3. If a recital transfer is MISSING from the EC — this is a RED FLAG:
+   - The EC may not cover the period (check EC period_from vs recital date)
+   - The transfer may have been unregistered
+   - The EC may have been tampered with or selectively obtained
+4. If the EC contains transfers NOT mentioned in recitals — less concerning (recitals typically
+   only trace the seller's line of acquisition, not all encumbrances), but note any discrepancies.
+5. Include this cross-referencing in the BROKEN_CHAIN_OF_TITLE check evidence.
 
 ═══ TOOL FAILURE HANDLING ═══
 

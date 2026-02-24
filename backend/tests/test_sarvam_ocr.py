@@ -6,7 +6,7 @@ These tests mock the sarvamai SDK entirely — no network calls.
 import asyncio
 import pytest
 from pathlib import Path
-from unittest.mock import patch, MagicMock, PropertyMock
+from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock
 
 from app.pipeline.sarvam_ocr import (
     _parse_sarvam_html,
@@ -430,7 +430,7 @@ class TestSarvamExtractText:
         """When the SDK throws, should log error and return None."""
         with patch("app.pipeline.sarvam_ocr.SARVAM_ENABLED", True), \
              patch("app.pipeline.sarvam_ocr._check_sarvam_sdk", return_value=True), \
-             patch("app.pipeline.sarvam_ocr._sarvam_extract_sync", side_effect=RuntimeError("API down")):
+             patch("app.pipeline.sarvam_ocr._sarvam_extract_async", new_callable=AsyncMock, side_effect=RuntimeError("API down")):
             result = asyncio.get_event_loop().run_until_complete(
                 sarvam_extract_text(Path("test.pdf"))
             )
@@ -441,6 +441,7 @@ class TestSarvamExtractSync:
     def test_successful_extraction(self, tmp_path):
         """Mock the full Sarvam flow: create job → upload → start → poll → download → parse."""
         import zipfile
+        import sys
 
         # Create a test PDF (just needs to exist)
         test_pdf = tmp_path / "test.pdf"
@@ -456,45 +457,38 @@ class TestSarvamExtractSync:
                 </body></html>
             """)
 
-        # Mock the SarvamAI SDK
+        # Mock the AsyncSarvamAI SDK
         mock_job = MagicMock()
         mock_job.job_id = "test-job-123"
 
         mock_status = MagicMock()
         mock_status.job_state = "Completed"
-        mock_job.wait_until_complete.return_value = mock_status
+        mock_job.upload_file = AsyncMock()
+        mock_job.start = AsyncMock()
+        mock_job.wait_until_complete = AsyncMock(return_value=mock_status)
 
         def mock_download(path):
             import shutil
             shutil.copy(str(output_zip), path)
 
-        mock_job.download_output = mock_download
+        mock_job.download_output = AsyncMock(side_effect=mock_download)
 
         mock_client = MagicMock()
-        mock_client.document_intelligence.create_job.return_value = mock_job
+        mock_client.document_intelligence.create_job = AsyncMock(return_value=mock_job)
+        mock_client._client = MagicMock()
+        mock_client._client.aclose = AsyncMock()
 
-        with patch("app.pipeline.sarvam_ocr.SARVAM_ENABLED", True), \
-             patch("app.pipeline.sarvam_ocr.SARVAM_API_KEY", "test-key"), \
-             patch("app.pipeline.sarvam_ocr.SARVAM_TIMEOUT", 10), \
-             patch("app.pipeline.sarvam_ocr.SARVAM_POLL_INTERVAL", 0.1):
+        mock_sarvamai = MagicMock()
+        mock_sarvamai.AsyncSarvamAI.return_value = mock_client
+        sys.modules["sarvamai"] = mock_sarvamai
 
-            # Patch the import inside _sarvam_extract_sync
-            import app.pipeline.sarvam_ocr as sarvam_mod
-            original_import = __builtins__.__import__ if hasattr(__builtins__, '__import__') else __import__
-
-            with patch.dict("sys.modules", {"sarvamai": MagicMock()}):
-                with patch("app.pipeline.sarvam_ocr.SARVAM_API_KEY", "test-key"):
-                    # Directly test with mocked internals
-                    from unittest.mock import patch as mock_patch
-                    import sys
-                    mock_sarvamai = MagicMock()
-                    mock_sarvamai.SarvamAI.return_value = mock_client
-                    sys.modules["sarvamai"] = mock_sarvamai
-
-                    try:
-                        result = _sarvam_extract_sync(test_pdf)
-                    finally:
-                        del sys.modules["sarvamai"]
+        try:
+            with patch("app.pipeline.sarvam_ocr.SARVAM_API_KEY", "test-key"), \
+                 patch("app.pipeline.sarvam_ocr.SARVAM_TIMEOUT", 10), \
+                 patch("app.pipeline.sarvam_ocr.SARVAM_POLL_INTERVAL", 0.1):
+                result = _sarvam_extract_sync(test_pdf)
+        finally:
+            del sys.modules["sarvamai"]
 
         assert result is not None
         assert result["total_pages"] == 2
@@ -505,22 +499,24 @@ class TestSarvamExtractSync:
 
     def test_timeout_returns_none(self, tmp_path):
         """If job doesn't complete within timeout, should return None."""
+        import sys
+
         test_pdf = tmp_path / "test.pdf"
         test_pdf.write_bytes(b"%PDF-1.4 test")
 
         mock_job = MagicMock()
         mock_job.job_id = "test-job-slow"
-
-        mock_status = MagicMock()
-        mock_status.job_state = "processing"  # never completes
-        mock_job.wait_until_complete.side_effect = TimeoutError("Sarvam timeout")
+        mock_job.upload_file = AsyncMock()
+        mock_job.start = AsyncMock()
+        mock_job.wait_until_complete = AsyncMock(side_effect=TimeoutError("Sarvam timeout"))
 
         mock_client = MagicMock()
-        mock_client.document_intelligence.create_job.return_value = mock_job
+        mock_client.document_intelligence.create_job = AsyncMock(return_value=mock_job)
+        mock_client._client = MagicMock()
+        mock_client._client.aclose = AsyncMock()
 
-        import sys
         mock_sarvamai = MagicMock()
-        mock_sarvamai.SarvamAI.return_value = mock_client
+        mock_sarvamai.AsyncSarvamAI.return_value = mock_client
         sys.modules["sarvamai"] = mock_sarvamai
 
         try:
@@ -535,23 +531,28 @@ class TestSarvamExtractSync:
 
     def test_failed_job_returns_none(self, tmp_path):
         """If Sarvam job fails, should return None."""
+        import sys
+
         test_pdf = tmp_path / "test.pdf"
         test_pdf.write_bytes(b"%PDF-1.4 test")
 
         mock_job = MagicMock()
         mock_job.job_id = "test-job-fail"
+        mock_job.upload_file = AsyncMock()
+        mock_job.start = AsyncMock()
 
         mock_status = MagicMock()
         mock_status.job_state = "Failed"
         mock_status.error_message = "Processing error"
-        mock_job.wait_until_complete.return_value = mock_status
+        mock_job.wait_until_complete = AsyncMock(return_value=mock_status)
 
         mock_client = MagicMock()
-        mock_client.document_intelligence.create_job.return_value = mock_job
+        mock_client.document_intelligence.create_job = AsyncMock(return_value=mock_job)
+        mock_client._client = MagicMock()
+        mock_client._client.aclose = AsyncMock()
 
-        import sys
         mock_sarvamai = MagicMock()
-        mock_sarvamai.SarvamAI.return_value = mock_client
+        mock_sarvamai.AsyncSarvamAI.return_value = mock_client
         sys.modules["sarvamai"] = mock_sarvamai
 
         try:
@@ -767,14 +768,14 @@ class TestExponentialBackoff:
 
         import sys
         mock_sarvamai = MagicMock()
-        mock_sarvamai.SarvamAI.side_effect = RuntimeError("down")
+        mock_sarvamai.AsyncSarvamAI.side_effect = RuntimeError("down")
         sys.modules["sarvamai"] = mock_sarvamai
 
         sleep_calls = []
 
         try:
             with patch("app.pipeline.sarvam_ocr.SARVAM_MAX_RETRIES", 3), \
-                 patch("app.pipeline.sarvam_ocr.time.sleep", side_effect=lambda s: sleep_calls.append(s)):
+                 patch("asyncio.sleep", new_callable=AsyncMock, side_effect=lambda s: sleep_calls.append(s)):
                 result = _sarvam_extract_sync(test_pdf)
         finally:
             del sys.modules["sarvamai"]
@@ -790,14 +791,14 @@ class TestExponentialBackoff:
 
         import sys
         mock_sarvamai = MagicMock()
-        mock_sarvamai.SarvamAI.side_effect = RuntimeError("down")
+        mock_sarvamai.AsyncSarvamAI.side_effect = RuntimeError("down")
         sys.modules["sarvamai"] = mock_sarvamai
 
         sleep_calls = []
 
         try:
             with patch("app.pipeline.sarvam_ocr.SARVAM_MAX_RETRIES", 1), \
-                 patch("app.pipeline.sarvam_ocr.time.sleep", side_effect=lambda s: sleep_calls.append(s)):
+                 patch("asyncio.sleep", new_callable=AsyncMock, side_effect=lambda s: sleep_calls.append(s)):
                 result = _sarvam_extract_sync(test_pdf)
         finally:
             del sys.modules["sarvamai"]
@@ -810,20 +811,17 @@ class TestExponentialBackoff:
         test_pdf = tmp_path / "test.pdf"
         test_pdf.write_bytes(b"%PDF-1.4 content")
 
-        import sys
         import app.pipeline.sarvam_ocr as sarvam_mod
 
         mock_result = {"total_pages": 1, "pages": [], "full_text": "ok"}
 
-        sleep_calls = []
-
-        with patch.object(sarvam_mod, "_sarvam_extract_single_attempt", return_value=mock_result), \
+        with patch.object(sarvam_mod, "_sarvam_single_attempt_async", new_callable=AsyncMock, return_value=mock_result), \
              patch("app.pipeline.sarvam_ocr.SARVAM_MAX_RETRIES", 3), \
-             patch("app.pipeline.sarvam_ocr.time.sleep", side_effect=lambda s: sleep_calls.append(s)):
+             patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
             result = _sarvam_extract_sync(test_pdf)
 
         assert result is not None
-        assert sleep_calls == []
+        assert mock_sleep.call_count == 0
 
 
 # ═══════════════════════════════════════════════════
@@ -840,15 +838,20 @@ class TestPerStepIsolation:
         reset_circuit_breaker()
 
     def _make_mock_client(self):
-        """Return a mock SarvamAI client with reasonable defaults."""
+        """Return a mock AsyncSarvamAI client with reasonable defaults."""
         mock_job = MagicMock()
         mock_job.job_id = "test-job"
         mock_status = MagicMock()
         mock_status.job_state = "Completed"
-        mock_job.wait_until_complete.return_value = mock_status
+        mock_job.upload_file = AsyncMock()
+        mock_job.start = AsyncMock()
+        mock_job.wait_until_complete = AsyncMock(return_value=mock_status)
+        mock_job.download_output = AsyncMock()
 
         mock_client = MagicMock()
-        mock_client.document_intelligence.create_job.return_value = mock_job
+        mock_client.document_intelligence.create_job = AsyncMock(return_value=mock_job)
+        mock_client._client = MagicMock()
+        mock_client._client.aclose = AsyncMock()
         return mock_client, mock_job
 
     def test_create_job_failure(self, tmp_path):
@@ -859,8 +862,10 @@ class TestPerStepIsolation:
         import sys
         mock_sarvamai = MagicMock()
         mock_client = MagicMock()
-        mock_client.document_intelligence.create_job.side_effect = RuntimeError("quota exceeded")
-        mock_sarvamai.SarvamAI.return_value = mock_client
+        mock_client.document_intelligence.create_job = AsyncMock(side_effect=RuntimeError("quota exceeded"))
+        mock_client._client = MagicMock()
+        mock_client._client.aclose = AsyncMock()
+        mock_sarvamai.AsyncSarvamAI.return_value = mock_client
         sys.modules["sarvamai"] = mock_sarvamai
 
         try:
@@ -873,15 +878,15 @@ class TestPerStepIsolation:
         assert result is None
 
     def test_upload_file_failure(self, tmp_path):
-        """upload_file raising should return None and attempt cancellation."""
+        """upload_file raising should return None."""
         test_pdf = tmp_path / "test.pdf"
         test_pdf.write_bytes(b"%PDF-1.4 test")
 
         import sys
         mock_sarvamai = MagicMock()
         mock_client, mock_job = self._make_mock_client()
-        mock_job.upload_file.side_effect = RuntimeError("network error")
-        mock_sarvamai.SarvamAI.return_value = mock_client
+        mock_job.upload_file = AsyncMock(side_effect=RuntimeError("network error"))
+        mock_sarvamai.AsyncSarvamAI.return_value = mock_client
         sys.modules["sarvamai"] = mock_sarvamai
 
         try:
@@ -892,18 +897,17 @@ class TestPerStepIsolation:
             del sys.modules["sarvamai"]
 
         assert result is None
-        mock_job.cancel.assert_called_once()
 
     def test_start_failure(self, tmp_path):
-        """job.start() raising should return None and cancel."""
+        """job.start() raising should return None."""
         test_pdf = tmp_path / "test.pdf"
         test_pdf.write_bytes(b"%PDF-1.4 test")
 
         import sys
         mock_sarvamai = MagicMock()
         mock_client, mock_job = self._make_mock_client()
-        mock_job.start.side_effect = RuntimeError("server error")
-        mock_sarvamai.SarvamAI.return_value = mock_client
+        mock_job.start = AsyncMock(side_effect=RuntimeError("server error"))
+        mock_sarvamai.AsyncSarvamAI.return_value = mock_client
         sys.modules["sarvamai"] = mock_sarvamai
 
         try:
@@ -914,7 +918,6 @@ class TestPerStepIsolation:
             del sys.modules["sarvamai"]
 
         assert result is None
-        mock_job.cancel.assert_called_once()
 
     def test_download_failure(self, tmp_path):
         """download_output raising should return None."""
@@ -924,8 +927,8 @@ class TestPerStepIsolation:
         import sys
         mock_sarvamai = MagicMock()
         mock_client, mock_job = self._make_mock_client()
-        mock_job.download_output.side_effect = RuntimeError("download failed")
-        mock_sarvamai.SarvamAI.return_value = mock_client
+        mock_job.download_output = AsyncMock(side_effect=RuntimeError("download failed"))
+        mock_sarvamai.AsyncSarvamAI.return_value = mock_client
         sys.modules["sarvamai"] = mock_sarvamai
 
         try:

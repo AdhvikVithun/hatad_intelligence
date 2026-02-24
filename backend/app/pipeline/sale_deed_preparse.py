@@ -27,12 +27,15 @@ class PreparseHints(TypedDict, total=False):
     registration_number: str          # e.g. "R/Vadavalli/Book1/5909/2012"
     registration_short: str           # e.g. "5909/2012"
     sro: str                         # Sub-Registrar Office name
+    book_number: str                 # e.g. "Book 1" from registration
     survey_numbers: list[str]         # e.g. ["317", "317/1A"]
     pan_numbers: list[str]            # e.g. ["AGUPP4291N", "ALCPS2485M"]
+    aadhaar_numbers: list[str]        # e.g. ["123456789012"]
     consideration_amount: int | None  # e.g. 56792000
     property_village: str             # from கிராமம் keyword context
     property_taluk: str               # from தாலூக்கா keyword context
     property_district: str            # from மாவட்டம் keyword context
+    land_classification: str          # Wet/Dry/Maidan from keywords
     seller_section: str               # text identified as seller portion
     buyer_section: str                # text identified as buyer portion
     seller_names: list[str]           # deterministic seller name candidates
@@ -42,6 +45,8 @@ class PreparseHints(TypedDict, total=False):
     property_type: str                # Agricultural / Residential from keywords
     stamp_value: int | None           # From stamp paper denomination (per-sheet)
     stamp_sheet_count: int            # Number of physical stamp sheets detected
+    stamp_serial_numbers: list[str]   # Stamp paper serial numbers detected
+    stamp_vendor_name: str            # Stamp vendor name
     total_stamp_value: int | None     # stamp_value × stamp_sheet_count
     stamp_duty_from_text: int | None  # Explicit stamp duty figure from deed body
     ownership_chain_count: int        # How many prior transfers detected
@@ -183,6 +188,124 @@ def extract_pan_numbers(text: str) -> list[str]:
         if pan not in found:
             found.append(pan)
     return found
+
+
+# ═══════════════════════════════════════════════════
+# AADHAAR NUMBER EXTRACTION
+# ═══════════════════════════════════════════════════
+
+# 12-digit Aadhaar: "1234 5678 9012" or "123456789012" or "ஆதார் எண்: 1234 5678 9012"
+_RE_AADHAAR = re.compile(
+    r'(?:aadhaar|aadhar|UID|ஆதார்|ஆதா(?:ர்)?\s*எண்)\s*(?:NO\.?\s*)?[:\s]*'
+    r'(\d{4}\s?\d{4}\s?\d{4})',
+    re.IGNORECASE,
+)
+
+# Standalone 12-digit pattern (less strict — only use after keyword match fails)
+_RE_AADHAAR_BARE = re.compile(r'\b(\d{4}\s\d{4}\s\d{4})\b')
+
+
+def extract_aadhaar_numbers(text: str) -> list[str]:
+    """Extract Aadhaar numbers (12 digits) from text.
+
+    First tries keyword-anchored patterns (high confidence), then falls
+    back to bare 12-digit spaced patterns near party sections.
+    """
+    found: list[str] = []
+    for m in _RE_AADHAAR.finditer(text):
+        aadhaar = re.sub(r'\s+', '', m.group(1))
+        if len(aadhaar) == 12 and aadhaar not in found:
+            found.append(aadhaar)
+
+    # Bare pattern — only in first half (party sections) to avoid false positives
+    if not found:
+        party_zone = text[:len(text) // 2]
+        for m in _RE_AADHAAR_BARE.finditer(party_zone):
+            aadhaar = re.sub(r'\s+', '', m.group(1))
+            if len(aadhaar) == 12 and aadhaar not in found:
+                found.append(aadhaar)
+
+    return found
+
+
+# ═══════════════════════════════════════════════════
+# LAND CLASSIFICATION DETECTION
+# ═══════════════════════════════════════════════════
+
+_LAND_CLASS_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r'நன்சை|நன்செய்|wet\s*land', re.IGNORECASE), "Wet"),
+    (re.compile(r'புன்சை|புஞ்சை|புன்செய்|dry\s*land', re.IGNORECASE), "Dry"),
+    (re.compile(r'மைதானம்|maidan', re.IGNORECASE), "Maidan"),
+    (re.compile(r'தோட்டம்|garden', re.IGNORECASE), "Garden"),
+]
+
+
+def detect_land_classification(text: str) -> str:
+    """Detect land classification from property schedule keywords.
+
+    Returns the first matching classification: Wet, Dry, Maidan, Garden, or "".
+    """
+    # Prefer schedule zone if found
+    schedule_zone = _find_schedule_zone(text)
+    search_text = text[schedule_zone[0]:schedule_zone[1]] if schedule_zone else text
+
+    for pat, classification in _LAND_CLASS_PATTERNS:
+        if pat.search(search_text):
+            return classification
+    # Fallback: full text
+    if schedule_zone:
+        for pat, classification in _LAND_CLASS_PATTERNS:
+            if pat.search(text):
+                return classification
+    return ""
+
+
+# ═══════════════════════════════════════════════════
+# STAMP VENDOR NAME EXTRACTION
+# ═══════════════════════════════════════════════════
+
+_RE_STAMP_VENDOR = re.compile(
+    r'(?:stamp\s*vendor|முத்திரைத்தாள்\s*வணிகர்)\s*[:\-]?\s*'
+    r'([A-Za-z\u0B80-\u0BFF][A-Za-z\u0B80-\u0BFF\s.]{3,60})',
+    re.IGNORECASE,
+)
+
+# Alternative: Name appears after "Licensed" and before next line break
+_RE_VENDOR_ALT = re.compile(
+    r'licensed\s+(?:stamp\s+)?vendor\s*[:\-]?\s*'
+    r'([A-Za-z][A-Za-z\s.]{3,60})',
+    re.IGNORECASE,
+)
+
+
+def extract_stamp_vendor_name(text: str) -> str:
+    """Extract stamp vendor name from stamp paper header."""
+    header = text[:4000]  # Vendor info is on first page
+    m = _RE_STAMP_VENDOR.search(header)
+    if m:
+        return m.group(1).strip().rstrip('.,;:-')
+    m = _RE_VENDOR_ALT.search(header)
+    if m:
+        return m.group(1).strip().rstrip('.,;:-')
+    return ""
+
+
+# ═══════════════════════════════════════════════════
+# STAMP SERIAL NUMBER COLLECTION
+# ═══════════════════════════════════════════════════
+
+def extract_stamp_serial_numbers(text: str) -> list[str]:
+    """Extract distinct stamp paper serial numbers from text.
+
+    Returns a list of normalized serial numbers (e.g. ['A123456', 'A123457']).
+    """
+    header = text[:8000]
+    serials: list[str] = []
+    for m in _RE_STAMP_SERIAL.finditer(header):
+        serial = re.sub(r'\s+', '', m.group(0)).upper()
+        if serial not in serials:
+            serials.append(serial)
+    return serials
 
 
 # ═══════════════════════════════════════════════════
@@ -891,6 +1014,10 @@ def preparse_sale_deed(full_text: str) -> PreparseHints:
     reg_full, reg_short, sro = extract_registration_number(full_text)
     if reg_full:
         hints["registration_number"] = reg_full
+        # Extract book number from full registration (R/SRO/BookN/...)
+        bm = re.search(r'Book\s*(\d+)', reg_full, re.IGNORECASE)
+        if bm:
+            hints["book_number"] = f"Book {bm.group(1)}"
     if reg_short:
         hints["registration_short"] = reg_short
     if sro:
@@ -906,6 +1033,11 @@ def preparse_sale_deed(full_text: str) -> PreparseHints:
     pans = extract_pan_numbers(full_text)
     if pans:
         hints["pan_numbers"] = pans
+
+    # Aadhaar numbers
+    aadhaars = extract_aadhaar_numbers(full_text)
+    if aadhaars:
+        hints["aadhaar_numbers"] = aadhaars
 
     # Consideration amount
     amount = extract_consideration_amount(full_text)
@@ -927,6 +1059,16 @@ def preparse_sale_deed(full_text: str) -> PreparseHints:
         # count_stamp_sheets found denomination but extract_stamp_value didn't
         hints["stamp_value"] = total_stamp
 
+    # Stamp serial numbers
+    stamp_serials = extract_stamp_serial_numbers(full_text)
+    if stamp_serials:
+        hints["stamp_serial_numbers"] = stamp_serials
+
+    # Stamp vendor name
+    vendor = extract_stamp_vendor_name(full_text)
+    if vendor:
+        hints["stamp_vendor_name"] = vendor
+
     # Explicit stamp duty from deed body text (highest priority)
     explicit_stamp_duty = extract_stamp_duty_from_text(full_text)
     if explicit_stamp_duty:
@@ -940,6 +1082,11 @@ def preparse_sale_deed(full_text: str) -> PreparseHints:
         hints["property_taluk"] = taluk
     if district:
         hints["property_district"] = district
+
+    # Land classification
+    land_class = detect_land_classification(full_text)
+    if land_class:
+        hints["land_classification"] = land_class
 
     # Seller/buyer section detection
     seller_sec, buyer_sec = detect_seller_buyer_sections(full_text)
@@ -988,9 +1135,9 @@ def preparse_sale_deed(full_text: str) -> PreparseHints:
     logger.info(
         f"Sale deed pre-parse: {len(hints)} hints extracted "
         f"(reg={bool(reg_full or reg_short)}, survey={len(surveys)}, "
-        f"pan={len(pans)}, village={bool(village)}, "
-        f"seller_section={bool(seller_sec)}, amount={amount}, "
-        f"chain={chain_count}, payment={payment})"
+        f"pan={len(pans)}, aadhaar={len(aadhaars)}, village={bool(village)}, "
+        f"land_class={land_class}, seller_section={bool(seller_sec)}, "
+        f"amount={amount}, chain={chain_count}, payment={payment})"
     )
 
     return hints
@@ -1043,6 +1190,14 @@ def format_hints_for_prompt(hints: PreparseHints) -> str:
     if hints.get("pan_numbers"):
         lines.append(f"  PAN Numbers Found: {', '.join(hints['pan_numbers'])}")
 
+    if hints.get("aadhaar_numbers"):
+        lines.append(f"  Aadhaar Numbers Found: {', '.join(hints['aadhaar_numbers'])}")
+        lines.append(f"    → Assign each to the corresponding seller/buyer party (match by proximity)")
+
+    if hints.get("land_classification"):
+        lines.append(f"  Land Classification: {hints['land_classification']}")
+        lines.append(f"    → Use as property.land_classification")
+
     if hints.get("seller_section") and hints.get("buyer_section"):
         lines.append(f"  Seller/Buyer Role Detection:")
         lines.append(f"    → Text BEFORE 'எழுதி வாங்குபவர்' contains SELLER names/addresses")
@@ -1067,6 +1222,16 @@ def format_hints_for_prompt(hints: PreparseHints) -> str:
     elif hints.get("stamp_value"):
         lines.append(f"  Stamp Paper Denomination: ₹{hints['stamp_value']:,}")
         lines.append(f"    → If deed is printed on MULTIPLE stamp sheets, multiply by sheet count")
+
+    if hints.get("stamp_serial_numbers"):
+        lines.append(f"  Stamp Serial Numbers: {', '.join(hints['stamp_serial_numbers'])}")
+        lines.append(f"    → Use these as stamp_paper.serial_numbers")
+    if hints.get("stamp_vendor_name"):
+        lines.append(f"  Stamp Vendor: {hints['stamp_vendor_name']}")
+        lines.append(f"    → Use as stamp_paper.vendor_name")
+    if hints.get("book_number"):
+        lines.append(f"  Book Number: {hints['book_number']}")
+        lines.append(f"    → Use as registration_details.book_number")
 
     if hints.get("previous_deed_date"):
         lines.append(f"  Previous Deed Date: {hints['previous_deed_date']}")

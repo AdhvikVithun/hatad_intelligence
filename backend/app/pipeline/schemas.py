@@ -89,10 +89,8 @@ _EC_TRANSACTION_SCHEMA = {
         "transaction_id": {"type": "string", "description": "Stable unique ID, e.g. EC-5909/2012-Vadavalli. Generated post-extraction."},
     },
     "required": [
-        "row_number", "date", "document_number", "document_year", "sro",
+        "row_number", "date", "document_number",
         "transaction_type", "seller_or_executant", "buyer_or_claimant",
-        "extent", "survey_number", "consideration_amount", "remarks",
-        "suspicious_flags",
     ],
 }
 
@@ -112,6 +110,17 @@ EXTRACT_EC_SCHEMA = {
             "maxItems": 200,
         },
         "extraction_notes": {"type": "string"},
+        "_field_confidence": {
+            "type": "object",
+            "description": "Per-field confidence scores (0.0-1.0). Include any field where confidence < 0.9.",
+            "additionalProperties": {"type": "number"},
+        },
+        "_extraction_red_flags": {
+            "type": "array",
+            "description": "Document-level red flags, anomalies, or concerns noticed during extraction.",
+            "items": {"type": "string"},
+            "maxItems": 15,
+        },
     },
     "required": [
         "ec_number", "property_description", "period_from", "period_to",
@@ -163,6 +172,17 @@ EXTRACT_PATTA_SCHEMA = {
         "tax_details": {"type": "string"},
         "irrigation_source": {"type": "string"},
         "remarks": {"type": "string"},
+        "_field_confidence": {
+            "type": "object",
+            "description": "Per-field confidence scores (0.0-1.0). Include any field where confidence < 0.9.",
+            "additionalProperties": {"type": "number"},
+        },
+        "_extraction_red_flags": {
+            "type": "array",
+            "description": "Red flags, anomalies, or concerns noticed during extraction.",
+            "items": {"type": "string"},
+            "maxItems": 15,
+        },
     },
     "required": [
         "patta_number", "owner_names", "survey_numbers",
@@ -183,8 +203,23 @@ _PARTY_SCHEMA = {
         "age": {"type": "string"},
         "address": {"type": "string"},
         "pan": {"type": "string"},
+        "aadhaar": {"type": "string", "description": "Aadhaar number (12 digits) if mentioned"},
+        "share_percentage": {"type": "string", "description": "Ownership share e.g. '50%', '1/3rd'"},
+        "identification_proof": {"type": "string", "description": "ID proof type and number other than PAN/Aadhaar"},
+        "relationship": {"type": "string", "description": "Relationship to other parties e.g. 'wife of Seller 1', 'son of X'"},
     },
-    "required": ["name", "father_name", "age", "address"],
+    "required": ["name"],
+}
+
+_WITNESS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string"},
+        "father_name": {"type": "string"},
+        "age": {"type": "string"},
+        "address": {"type": "string"},
+    },
+    "required": ["name"],
 }
 
 _OWNERSHIP_LINK_SCHEMA = {
@@ -234,6 +269,14 @@ EXTRACT_SALE_DEED_SCHEMA = {
                     "type": "string",
                     "enum": ["Residential", "Agricultural", "Commercial", "Industrial", "Mixed", "Unknown"],
                 },
+                "land_classification": {
+                    "type": "string",
+                    "description": "Land type: Wet (நன்சை), Dry (புன்சை), Maidan, Garden, or Unknown",
+                },
+                "plot_number": {"type": "string", "description": "Plot/sub-division number if applicable"},
+                "door_number": {"type": "string", "description": "Property door number (கதவு எண்) if built-up property"},
+                "measurement_reference": {"type": "string", "description": "FMB/sketch measurement reference if mentioned"},
+                "assessment_number": {"type": "string", "description": "Municipal assessment/tax number if mentioned"},
             },
             "required": ["survey_number", "village", "taluk", "district", "extent", "boundaries", "property_type"],
         },
@@ -241,12 +284,35 @@ EXTRACT_SALE_DEED_SCHEMA = {
         "financials": {
             "type": "object",
             "properties": {
-                "consideration_amount": {"type": "integer"},
-                "guideline_value": {"type": "integer"},
-                "stamp_duty": {"type": "integer"},
-                "registration_fee": {"type": "integer"},
+                "consideration_amount": {"type": "number"},
+                "guideline_value": {"type": "number"},
+                "stamp_duty": {"type": "number"},
+                "registration_fee": {"type": "number"},
             },
             "required": ["consideration_amount", "guideline_value", "stamp_duty", "registration_fee"],
+        },
+        "stamp_paper": {
+            "type": "object",
+            "description": "Stamp paper details used for this deed",
+            "properties": {
+                "serial_numbers": {"type": "array", "items": {"type": "string"}, "maxItems": 20,
+                                   "description": "Stamp paper serial numbers (e.g. 'A 123456')"},
+                "vendor_name": {"type": "string", "description": "Stamp paper vendor name"},
+                "denomination_per_sheet": {"type": "integer", "description": "Denomination of each sheet in rupees"},
+                "sheet_count": {"type": "integer", "description": "Number of physical stamp sheets"},
+                "total_stamp_value": {"type": "integer", "description": "Total stamp paper value (denomination × sheets)"},
+            },
+        },
+        "registration_details": {
+            "type": "object",
+            "description": "Book/volume/page registration office metadata",
+            "properties": {
+                "book_number": {"type": "string"},
+                "volume_number": {"type": "string"},
+                "page_number": {"type": "string"},
+                "certified_copy_number": {"type": "string"},
+                "certified_copy_date": {"type": "string"},
+            },
         },
         "payment_mode": {"type": "string"},
         "previous_ownership": {
@@ -269,10 +335,21 @@ EXTRACT_SALE_DEED_SCHEMA = {
         },
         "encumbrance_declaration": {"type": "string"},
         "possession_date": {"type": "string"},
-        "witnesses": {"type": "array", "items": {"type": "string"}, "maxItems": 10},
+        "witnesses": {"type": "array", "items": _WITNESS_SCHEMA, "maxItems": 10},
         "special_conditions": {"type": "array", "items": {"type": "string"}, "maxItems": 20},
         "power_of_attorney": {"type": "string"},
         "remarks": {"type": "string"},
+        "_field_confidence": {
+            "type": "object",
+            "description": "Per-field confidence scores (0.0-1.0). Include any field where confidence < 0.9.",
+            "additionalProperties": {"type": "number"},
+        },
+        "_extraction_red_flags": {
+            "type": "array",
+            "description": "Red flags, anomalies, or concerns noticed during extraction.",
+            "items": {"type": "string"},
+            "maxItems": 15,
+        },
     },
     "required": [
         "document_number", "registration_date", "execution_date", "sro",
@@ -280,6 +357,58 @@ EXTRACT_SALE_DEED_SCHEMA = {
         "payment_mode", "previous_ownership", "ownership_history",
         "encumbrance_declaration", "possession_date",
         "witnesses", "special_conditions", "power_of_attorney", "remarks",
+    ],
+}
+
+# ═══════════════════════════════════════════════════
+# SALE DEED SUMMARIZATION
+# ═══════════════════════════════════════════════════
+
+SUMMARIZE_SALE_DEED_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "document_number": {"type": "string"},
+        "registration_date": {"type": "string"},
+        "sro": {"type": "string"},
+        "transaction_summary": {
+            "type": "string",
+            "description": "One-paragraph human-readable summary of the entire transaction",
+        },
+        "seller_names": {"type": "array", "items": {"type": "string"}, "maxItems": 10},
+        "buyer_names": {"type": "array", "items": {"type": "string"}, "maxItems": 10},
+        "property_summary": {
+            "type": "string",
+            "description": "Compact property description: survey, village, extent, classification",
+        },
+        "ownership_chain": {
+            "type": "array", "items": {"type": "string"}, "maxItems": 20,
+            "description": "Chronological ownership chain: 'A → B (Sale, Doc 123/1990)'",
+        },
+        "financial_summary": {
+            "type": "object",
+            "properties": {
+                "consideration_amount": {"type": "number"},
+                "guideline_value": {"type": "number"},
+                "stamp_duty": {"type": "number"},
+                "registration_fee": {"type": "number"},
+                "stamp_duty_adequate": {"type": "boolean"},
+            },
+        },
+        "risk_flags": {
+            "type": "array", "items": {"type": "string"}, "maxItems": 20,
+            "description": "Identified risks: undervaluation, GPA sale, missing encumbrance cert, etc.",
+        },
+        "completeness_score": {
+            "type": "string",
+            "description": "Assessment: COMPLETE / MOSTLY_COMPLETE / PARTIAL / INCOMPLETE",
+        },
+        "summary_notes": {"type": "string"},
+    },
+    "required": [
+        "document_number", "registration_date", "sro",
+        "transaction_summary", "seller_names", "buyer_names",
+        "property_summary", "ownership_chain", "financial_summary",
+        "risk_flags", "completeness_score", "summary_notes",
     ],
 }
 
@@ -504,6 +633,17 @@ EXTRACT_FMB_SCHEMA = {
         "land_classification": {"type": "string", "description": "Wet/Dry/Garden/House site"},
         "sketch_notes": {"type": "string", "description": "Any notes from the FMB sketch"},
         "remarks": {"type": "string"},
+        "_field_confidence": {
+            "type": "object",
+            "description": "Per-field confidence scores (0.0-1.0). Include any field where confidence < 0.9.",
+            "additionalProperties": {"type": "number"},
+        },
+        "_extraction_red_flags": {
+            "type": "array",
+            "description": "Red flags, anomalies, or concerns noticed during extraction.",
+            "items": {"type": "string"},
+            "maxItems": 15,
+        },
     },
     "required": ["survey_number", "village", "taluk", "boundaries", "remarks"],
 }
@@ -547,6 +687,17 @@ EXTRACT_ADANGAL_SCHEMA = {
         "taluk": {"type": "string"},
         "district": {"type": "string"},
         "remarks": {"type": "string"},
+        "_field_confidence": {
+            "type": "object",
+            "description": "Per-field confidence scores (0.0-1.0). Include any field where confidence < 0.9.",
+            "additionalProperties": {"type": "number"},
+        },
+        "_extraction_red_flags": {
+            "type": "array",
+            "description": "Red flags, anomalies, or concerns noticed during extraction.",
+            "items": {"type": "string"},
+            "maxItems": 15,
+        },
     },
     "required": ["survey_number", "owner_name", "extent", "soil_type",
                   "village", "taluk", "remarks"],
@@ -599,6 +750,17 @@ EXTRACT_LAYOUT_SCHEMA = {
             "enum": ["approved", "expired", "revoked", "unknown"],
         },
         "remarks": {"type": "string"},
+        "_field_confidence": {
+            "type": "object",
+            "description": "Per-field confidence scores (0.0-1.0). Include any field where confidence < 0.9.",
+            "additionalProperties": {"type": "number"},
+        },
+        "_extraction_red_flags": {
+            "type": "array",
+            "description": "Red flags, anomalies, or concerns noticed during extraction.",
+            "items": {"type": "string"},
+            "maxItems": 15,
+        },
     },
     "required": ["approval_number", "authority", "approval_date", "village", "remarks"],
 }
@@ -642,6 +804,17 @@ EXTRACT_LEGAL_HEIR_SCHEMA = {
         "taluk": {"type": "string"},
         "district": {"type": "string"},
         "remarks": {"type": "string"},
+        "_field_confidence": {
+            "type": "object",
+            "description": "Per-field confidence scores (0.0-1.0). Include any field where confidence < 0.9.",
+            "additionalProperties": {"type": "number"},
+        },
+        "_extraction_red_flags": {
+            "type": "array",
+            "description": "Red flags, anomalies, or concerns noticed during extraction.",
+            "items": {"type": "string"},
+            "maxItems": 15,
+        },
     },
     "required": ["deceased_name", "date_of_death", "heirs", "remarks"],
 }
@@ -693,6 +866,17 @@ EXTRACT_POA_SCHEMA = {
             "maxItems": 10,
         },
         "remarks": {"type": "string"},
+        "_field_confidence": {
+            "type": "object",
+            "description": "Per-field confidence scores (0.0-1.0). Include any field where confidence < 0.9.",
+            "additionalProperties": {"type": "number"},
+        },
+        "_extraction_red_flags": {
+            "type": "array",
+            "description": "Red flags, anomalies, or concerns noticed during extraction.",
+            "items": {"type": "string"},
+            "maxItems": 15,
+        },
     },
     "required": ["principal", "agent", "powers_granted", "is_general_or_specific",
                   "revocation_status", "remarks"],
@@ -744,6 +928,17 @@ EXTRACT_COURT_ORDER_SCHEMA = {
             "maxItems": 10,
         },
         "remarks": {"type": "string"},
+        "_field_confidence": {
+            "type": "object",
+            "description": "Per-field confidence scores (0.0-1.0). Include any field where confidence < 0.9.",
+            "additionalProperties": {"type": "number"},
+        },
+        "_extraction_red_flags": {
+            "type": "array",
+            "description": "Red flags, anomalies, or concerns noticed during extraction.",
+            "items": {"type": "string"},
+            "maxItems": 15,
+        },
     },
     "required": ["case_number", "court_name", "order_type", "petitioner",
                   "respondent", "status", "remarks"],
@@ -814,6 +1009,17 @@ EXTRACT_WILL_SCHEMA = {
         "survey_number": {"type": "string"},
         "village": {"type": "string"},
         "remarks": {"type": "string"},
+        "_field_confidence": {
+            "type": "object",
+            "description": "Per-field confidence scores (0.0-1.0). Include any field where confidence < 0.9.",
+            "additionalProperties": {"type": "number"},
+        },
+        "_extraction_red_flags": {
+            "type": "array",
+            "description": "Red flags, anomalies, or concerns noticed during extraction.",
+            "items": {"type": "string"},
+            "maxItems": 15,
+        },
     },
     "required": ["testator", "beneficiaries", "probate_status", "remarks"],
 }
@@ -875,6 +1081,17 @@ EXTRACT_PARTITION_SCHEMA = {
             "maxItems": 5,
         },
         "remarks": {"type": "string"},
+        "_field_confidence": {
+            "type": "object",
+            "description": "Per-field confidence scores (0.0-1.0). Include any field where confidence < 0.9.",
+            "additionalProperties": {"type": "number"},
+        },
+        "_extraction_red_flags": {
+            "type": "array",
+            "description": "Red flags, anomalies, or concerns noticed during extraction.",
+            "items": {"type": "string"},
+            "maxItems": 15,
+        },
     },
     "required": ["joint_owners", "partitioned_shares", "remarks"],
 }
@@ -922,7 +1139,7 @@ EXTRACT_GIFT_DEED_SCHEMA = {
         },
         "is_revocable": {"type": "boolean"},
         "acceptance_clause": {"type": "boolean", "description": "Whether donee has accepted"},
-        "consideration_amount": {"type": "integer", "description": "Should be 0 for valid gift"},
+        "consideration_amount": {"type": "number", "description": "Should be 0 for valid gift"},
         "conditions": {
             "type": "array",
             "items": {"type": "string"},
@@ -934,6 +1151,17 @@ EXTRACT_GIFT_DEED_SCHEMA = {
             "maxItems": 5,
         },
         "remarks": {"type": "string"},
+        "_field_confidence": {
+            "type": "object",
+            "description": "Per-field confidence scores (0.0-1.0). Include any field where confidence < 0.9.",
+            "additionalProperties": {"type": "number"},
+        },
+        "_extraction_red_flags": {
+            "type": "array",
+            "description": "Red flags, anomalies, or concerns noticed during extraction.",
+            "items": {"type": "string"},
+            "maxItems": 15,
+        },
     },
     "required": ["donor", "donee", "is_revocable", "acceptance_clause", "remarks"],
 }
@@ -991,8 +1219,22 @@ EXTRACT_RELEASE_DEED_SCHEMA = {
             "items": {"type": "string"},
             "maxItems": 10,
         },
-        "consideration_amount": {"type": "integer"},
+        "consideration_amount": {"type": "number"},
+        "original_loan_amount": {"type": "number", "description": "Original mortgage/loan amount if mortgage release"},
+        "outstanding_at_release": {"type": "number", "description": "Amount outstanding at time of release"},
+        "repayment_confirmed": {"type": "boolean", "description": "Whether full repayment is confirmed in the deed"},
         "remarks": {"type": "string"},
+        "_field_confidence": {
+            "type": "object",
+            "description": "Per-field confidence scores (0.0-1.0). Include any field where confidence < 0.9.",
+            "additionalProperties": {"type": "number"},
+        },
+        "_extraction_red_flags": {
+            "type": "array",
+            "description": "Red flags, anomalies, or concerns noticed during extraction.",
+            "items": {"type": "string"},
+            "maxItems": 15,
+        },
     },
     "required": ["releasing_party", "beneficiary", "original_document",
                   "claim_released", "remarks"],
@@ -1044,6 +1286,17 @@ EXTRACT_A_REGISTER_SCHEMA = {
             "maxItems": 30,
         },
         "remarks": {"type": "string"},
+        "_field_confidence": {
+            "type": "object",
+            "description": "Per-field confidence scores (0.0-1.0). Include any field where confidence < 0.9.",
+            "additionalProperties": {"type": "number"},
+        },
+        "_extraction_red_flags": {
+            "type": "array",
+            "description": "Red flags, anomalies, or concerns noticed during extraction.",
+            "items": {"type": "string"},
+            "maxItems": 15,
+        },
     },
     "required": ["owner_name", "survey_numbers", "village", "taluk", "remarks"],
 }
@@ -1080,6 +1333,17 @@ EXTRACT_CHITTA_SCHEMA = {
         "irrigation_source": {"type": "string"},
         "soil_classification_details": {"type": "string"},
         "remarks": {"type": "string"},
+        "_field_confidence": {
+            "type": "object",
+            "description": "Per-field confidence scores (0.0-1.0). Include any field where confidence < 0.9.",
+            "additionalProperties": {"type": "number"},
+        },
+        "_extraction_red_flags": {
+            "type": "array",
+            "description": "Red flags, anomalies, or concerns noticed during extraction.",
+            "items": {"type": "string"},
+            "maxItems": 15,
+        },
     },
     "required": ["owner_name", "survey_numbers", "village", "taluk", "remarks"],
 }

@@ -32,6 +32,8 @@ EVIDENCE FORMAT — Every check MUST include evidence with:
 If a check is NOT_APPLICABLE, evidence must explain WHY (e.g. "Only one document type available — cross-check not possible.").
 If you find no relevant data, say so explicitly — do NOT invent or assume facts.
 
+IMPORTANT: Always use the ACTUAL filenames from the uploaded documents in your evidence citations, NOT generic placeholders like "EC_Document.pdf" or "SaleDeed.pdf". The real filenames are provided in the document data below.
+
 ═══ FEW-SHOT EXAMPLES ═══
 
 Below are GOLD-STANDARD examples of correct check results. Study the reasoning, evidence format, and status assignment carefully.

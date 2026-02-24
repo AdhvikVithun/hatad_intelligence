@@ -34,7 +34,7 @@ official designations, and any legal conditions or restrictions.
 Return valid JSON with keys describing what you found. 
 Always include: "document_summary", "key_parties", "property_details", "key_dates", "amounts", "notable_clauses"."""
 
-    async def extract(self, extracted_text: dict, on_progress: LLMProgressCallback | None = None, filename: str = "", file_path: "Path | None" = None) -> dict:
+    async def extract(self, extracted_text: dict, on_progress: LLMProgressCallback | None = None, filename: str = "", file_path: "Path | None" = None, **kwargs) -> dict:
         full_text = extracted_text.get("full_text", "")
         pages = extracted_text.get("pages", [])
         name = filename or "document"

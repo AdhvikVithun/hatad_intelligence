@@ -57,7 +57,7 @@ class AdangalExtractor(BaseExtractor):
             expect_json=EXTRACT_ADANGAL_SCHEMA,
             task_label=f"{label} extraction ({len(text):,} chars)",
             on_progress=on_progress,
-            think=True,
+            think=False,  # Simple tabular lookup — no CoT needed
         )
 
     @staticmethod

@@ -57,7 +57,7 @@ class ARegisterExtractor(BaseExtractor):
             expect_json=EXTRACT_A_REGISTER_SCHEMA,
             task_label=f"{label} extraction ({len(text):,} chars)",
             on_progress=on_progress,
-            think=True,
+            think=False,  # Tabular register lookup — no CoT needed
         )
 
     @staticmethod

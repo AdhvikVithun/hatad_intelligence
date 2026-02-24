@@ -157,8 +157,22 @@ class TestEcPeriodCoverage:
         assert c["status"] == "FAIL"
 
     def test_stale_ec(self):
-        """EC ending more than 90 days ago → DET_EC_STALE."""
+        """EC ending more than 30 days ago → DET_EC_STALE."""
         old_end = (datetime.now() - timedelta(days=200)).strftime("%d-%m-%Y")
+        data = _ec("01-01-2010", old_end)
+        checks = check_ec_period_coverage(data)
+        assert "DET_EC_STALE" in _codes(checks)
+
+    def test_ec_not_stale_within_30_days(self):
+        """EC ending 10 days ago → NOT stale."""
+        recent_end = (datetime.now() - timedelta(days=10)).strftime("%d-%m-%Y")
+        data = _ec("01-01-2010", recent_end)
+        checks = check_ec_period_coverage(data)
+        assert "DET_EC_STALE" not in _codes(checks)
+
+    def test_ec_stale_at_45_days(self):
+        """EC ending 45 days ago → DET_EC_STALE (> 30 threshold)."""
+        old_end = (datetime.now() - timedelta(days=45)).strftime("%d-%m-%Y")
         data = _ec("01-01-2010", old_end)
         checks = check_ec_period_coverage(data)
         assert "DET_EC_STALE" in _codes(checks)
@@ -1842,7 +1856,13 @@ class TestComputeScoreDeductions:
 # ═══════════════════════════════════════════════════
 
 class TestAnnotateCheckConfidence:
-    """Tests for _annotate_check_confidence per-check metadata."""
+    """Tests for _annotate_check_confidence per-check metadata.
+
+    The function aggregates from ``_field_confidence`` (per-field band dict)
+    rather than a single ``_confidence_score``.  Field bands map to:
+    high=1.0, medium=0.7, low=0.4.  The minimum across all fields across
+    all documents whose type is in needed_types becomes the overall score.
+    """
 
     def test_high_confidence_annotated(self):
         from app.pipeline.orchestrator import _annotate_check_confidence
@@ -1850,12 +1870,12 @@ class TestAnnotateCheckConfidence:
         extracted = {
             "doc.pdf": {
                 "document_type": "EC",
-                "data": {"_confidence_score": 0.92},
+                "data": {"_field_confidence": {"ec_number": "high", "property_description": "high"}},
             }
         }
         _annotate_check_confidence(checks, extracted, ["EC"])
         assert checks[0]["data_confidence"] == "HIGH"
-        assert checks[0]["data_confidence_score"] == 0.92
+        assert checks[0]["data_confidence_score"] == 1.0
 
     def test_low_confidence_annotated(self):
         from app.pipeline.orchestrator import _annotate_check_confidence
@@ -1863,12 +1883,12 @@ class TestAnnotateCheckConfidence:
         extracted = {
             "doc.pdf": {
                 "document_type": "SALE_DEED",
-                "data": {"_confidence_score": 0.35},
+                "data": {"_field_confidence": {"consideration_amount": "low", "stamp_duty": "high"}},
             }
         }
         _annotate_check_confidence(checks, extracted, ["SALE_DEED"])
         assert checks[0]["data_confidence"] == "VERY_LOW"
-        assert checks[0]["data_confidence_score"] == 0.35
+        assert checks[0]["data_confidence_score"] == 0.4
 
     def test_min_across_doc_types(self):
         """Cross-doc groups should use the minimum confidence across documents."""
@@ -1877,16 +1897,16 @@ class TestAnnotateCheckConfidence:
         extracted = {
             "ec.pdf": {
                 "document_type": "EC",
-                "data": {"_confidence_score": 0.95},
+                "data": {"_field_confidence": {"ec_number": "high"}},
             },
             "patta.pdf": {
                 "document_type": "PATTA",
-                "data": {"_confidence_score": 0.55},
+                "data": {"_field_confidence": {"patta_number": "high", "owner_name": "medium"}},
             },
         }
         _annotate_check_confidence(checks, extracted, ["EC", "PATTA"])
-        assert checks[0]["data_confidence"] == "LOW"
-        assert checks[0]["data_confidence_score"] == 0.55
+        assert checks[0]["data_confidence"] == "MODERATE"
+        assert checks[0]["data_confidence_score"] == 0.7
 
     def test_irrelevant_doc_types_ignored(self):
         """Only doc types in needed_types are considered."""
@@ -1895,19 +1915,19 @@ class TestAnnotateCheckConfidence:
         extracted = {
             "ec.pdf": {
                 "document_type": "EC",
-                "data": {"_confidence_score": 0.90},
+                "data": {"_field_confidence": {"ec_number": "high"}},
             },
             "sale.pdf": {
                 "document_type": "SALE_DEED",
-                "data": {"_confidence_score": 0.30},  # low but irrelevant
+                "data": {"_field_confidence": {"amount": "low"}},  # low but irrelevant
             },
         }
         _annotate_check_confidence(checks, extracted, ["EC"])
         assert checks[0]["data_confidence"] == "HIGH"
-        assert checks[0]["data_confidence_score"] == 0.9
+        assert checks[0]["data_confidence_score"] == 1.0
 
     def test_no_confidence_no_annotation(self):
-        """If no documents have confidence scores, checks unchanged."""
+        """If no documents have _field_confidence, checks unchanged."""
         from app.pipeline.orchestrator import _annotate_check_confidence
         checks = [{"rule_code": "X", "status": "PASS"}]
         extracted = {
@@ -1919,6 +1939,37 @@ class TestAnnotateCheckConfidence:
     def test_empty_checks_no_error(self):
         from app.pipeline.orchestrator import _annotate_check_confidence
         _annotate_check_confidence([], {}, ["EC"])  # should not raise
+
+    def test_mixed_bands_uses_minimum(self):
+        """Multiple fields with mixed bands → minimum wins."""
+        from app.pipeline.orchestrator import _annotate_check_confidence
+        checks = [{"rule_code": "X", "status": "PASS"}]
+        extracted = {
+            "doc.pdf": {
+                "document_type": "EC",
+                "data": {"_field_confidence": {
+                    "ec_number": "high",
+                    "property_description": "medium",
+                    "executant": "low",
+                }},
+            }
+        }
+        _annotate_check_confidence(checks, extracted, ["EC"])
+        assert checks[0]["data_confidence"] == "VERY_LOW"
+        assert checks[0]["data_confidence_score"] == 0.4
+
+    def test_empty_field_confidence_dict_no_annotation(self):
+        """Empty _field_confidence dict → no annotation (no fields to aggregate)."""
+        from app.pipeline.orchestrator import _annotate_check_confidence
+        checks = [{"rule_code": "X", "status": "PASS"}]
+        extracted = {
+            "doc.pdf": {
+                "document_type": "EC",
+                "data": {"_field_confidence": {}},
+            }
+        }
+        _annotate_check_confidence(checks, extracted, ["EC"])
+        assert "data_confidence" not in checks[0]
 
 class TestTSNoPrefixInEC:
     """EC property_description with T.S.No., O.S.No., N.S.No. prefixes

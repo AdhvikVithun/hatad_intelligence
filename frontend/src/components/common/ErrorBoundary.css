@@ -92,3 +92,19 @@
   font-size: var(--text-sm);
   color: var(--text-dim);
 }
+
+.pipeline-failed-banner__retry {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: inherit;
+  font-family: inherit;
+  padding: 0;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.pipeline-failed-banner__retry:hover {
+  color: var(--accent-hover, var(--accent));
+  opacity: 0.85;
+}

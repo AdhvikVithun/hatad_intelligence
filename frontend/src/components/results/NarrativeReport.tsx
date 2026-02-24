@@ -1,3 +1,5 @@
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import './NarrativeReport.css';
 
 interface Props {
@@ -10,7 +12,9 @@ export function NarrativeReport({ report }: Props) {
   }
   return (
     <div className="report-view">
-      <div className="report-content">{report}</div>
+      <div className="report-content">
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{report}</ReactMarkdown>
+      </div>
     </div>
   );
 }

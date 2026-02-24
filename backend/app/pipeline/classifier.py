@@ -10,7 +10,11 @@ import logging
 import re
 from collections import Counter
 from pathlib import Path
-from app.config import PROMPTS_DIR
+from app.config import (
+    PROMPTS_DIR, DOCUMENT_TYPES,
+    CLASSIFY_MAX_CHARS, CLASSIFY_MAX_PAGES, CLASSIFY_MAX_TOKENS,
+    CLASSIFY_RETRY_MAX_CHARS, CLASSIFY_RETRY_MAX_PAGES,
+)
 from app.pipeline.llm_client import call_llm, LLMProgressCallback
 from app.pipeline.schemas import CLASSIFY_SCHEMA
 
@@ -141,16 +145,119 @@ def _select_best_pages(pages: list[dict], max_pages: int = 2) -> list[dict]:
     return best
 
 
+# ── Deterministic keyword pre-classifier ──────────────────────────
+# High-signal Tamil/English patterns mapped to document types.
+# Each entry is (doc_type, compiled_regex).  Patterns are intentionally
+# restrictive — false negatives go to the LLM (safe), false positives
+# would bypass it (dangerous), so we only include very specific terms.
+
+_KEYWORD_PATTERNS: list[tuple[str, re.Pattern]] = [
+    ("EC", re.compile(
+        r"(?:சுமையின்மை\s*சான்றிதழ்|Encumbrance\s+Certificate|"
+        r"Certificate\s+of\s+Encumbrance|வில்லங்கச்?\s*சான்று|"
+        r"வில்லங்க\s*சான்றிதழ்|EC\s*(?:No|Number|எண்)[.:\s]|"
+        r"ENCUMBRANCE\s+CERTIFICATE)",
+        re.IGNORECASE | re.UNICODE)),
+    ("PATTA", re.compile(
+        r"(?:பட்டா\s*எண்|Patta\s*(?:No|Number|Chitta)[.:\s])",
+        re.IGNORECASE | re.UNICODE)),
+    ("A_REGISTER", re.compile(
+        r"(?:அ[\-‐–]?\s*பதிவேடு|A[\-‐–]?\s*Register|A[\-‐–]?\s*Pathivedu)",
+        re.IGNORECASE | re.UNICODE)),
+    ("SALE_DEED", re.compile(
+        r"(?:விற்பனை\s*பத்திரம்|Sale\s+Deed|SALE\s+DEED|"
+        r"Deed\s+of\s+(?:Sale|Conveyance)|"
+        r"விலை\s*ஆவணம்|"
+        r"Certified\s+Copy\s+of\s+(?:R|Register)|"
+        r"Book\s*(?:I|1)\s*/\s*\d+\s*/\s*\d{4})",
+        re.IGNORECASE | re.UNICODE)),
+    ("CHITTA", re.compile(
+        r"(?:சிட்டா\s|Chitta\s*(?:No|Number|Extract)[.:\s])",
+        re.IGNORECASE | re.UNICODE)),
+    ("ADANGAL", re.compile(
+        r"(?:அடங்கல்|Adangal|Village\s+Account)",
+        re.IGNORECASE | re.UNICODE)),
+    ("FMB", re.compile(
+        r"(?:Field\s+Measurement\s+Book|FMB\s*(?:No|Sketch|Extract)|"
+        r"வரைபட\s*எண்|நில\s*அளவை)",
+        re.IGNORECASE | re.UNICODE)),
+    ("LAYOUT_APPROVAL", re.compile(
+        r"(?:Layout\s+Approval|CMDA|DTCP|வரைபட\s*ஒப்புதல்|"
+        r"Planning\s+Permission|Approved\s+Layout)",
+        re.IGNORECASE | re.UNICODE)),
+    ("LEGAL_HEIR", re.compile(
+        r"(?:Legal\s+Heir\s+Certificate|சட்ட\s*வாரிசு\s*சான்றிதழ்|"
+        r"வாரிசு\s*சான்று)",
+        re.IGNORECASE | re.UNICODE)),
+    ("POA", re.compile(
+        r"(?:Power\s+of\s+Attorney|அதிகார\s*பத்திரம்|General\s+Power|"
+        r"Special\s+Power\s+of\s+Attorney)",
+        re.IGNORECASE | re.UNICODE)),
+    ("COURT_ORDER", re.compile(
+        r"(?:Court\s+Order|நீதிமன்ற\s*ஆணை|Decree|"
+        r"(?:District|High|Supreme)\s+Court|O\.?S\.?\s*No\.?)",
+        re.IGNORECASE | re.UNICODE)),
+    ("WILL", re.compile(
+        r"(?:Last\s+Will|Testament|உயிலின்|உயில்\s)",
+        re.IGNORECASE | re.UNICODE)),
+    ("PARTITION_DEED", re.compile(
+        r"(?:Partition\s+Deed|பாகப்\s*பிரிவினை\s*பத்திரம்|"
+        r"Deed\s+of\s+Partition)",
+        re.IGNORECASE | re.UNICODE)),
+    ("GIFT_DEED", re.compile(
+        r"(?:Gift\s+Deed|தான\s*பத்திரம்|Deed\s+of\s+Gift)",
+        re.IGNORECASE | re.UNICODE)),
+    ("RELEASE_DEED", re.compile(
+        r"(?:Release\s+Deed|விடுதலை\s*பத்திரம்|"
+        r"Deed\s+of\s+Release|Mortgage\s+Release)",
+        re.IGNORECASE | re.UNICODE)),
+]
+
+
+def _get_keyword_hints(text: str, filename: str = "") -> tuple[str | None, list[str]]:
+    """Return (single_match, all_matches) from keyword pre-classifier.
+
+    Also checks filename for TNREGINET CCA patterns — these certified
+    copies are almost always registered deeds (Sale Deed, Gift Deed, etc.).
+    """
+    matches: list[str] = []
+    for doc_type, pattern in _KEYWORD_PATTERNS:
+        if pattern.search(text):
+            matches.append(doc_type)
+
+    # TNREGINET Certified Copy Application filenames → hint at registered deed
+    if filename and re.search(r'CCA[_\-]?Online', filename, re.IGNORECASE):
+        if "SALE_DEED" not in matches:
+            matches.append("SALE_DEED")
+
+    # Disambiguation: EC documents naturally list sale deeds as transactions,
+    # so SALE_DEED keywords often appear inside ECs.  When both match the
+    # document header keywords ("Certificate of Encumbrance") are the real
+    # signal — the SALE_DEED hit is just a transaction row.  EC wins.
+    if "EC" in matches and "SALE_DEED" in matches:
+        matches.remove("SALE_DEED")
+
+    if len(matches) == 1:
+        return matches[0], matches
+    return None, matches
+
+
 async def classify_document(
     extracted_text: dict,
     filename: str = "",
     on_progress: LLMProgressCallback | None = None,
     file_path: Path | None = None,
 ) -> dict:
-    """Classify a document using the text LLM (gpt-oss).
+    """Classify a document using deterministic keywords + LLM fallback.
 
-    Uses extracted text (pdfplumber + Sarvam OCR) for classification.
-    This is faster and more reliable than vision-based classification.
+    Strategy:
+      1. Run keyword pre-classifier on cleaned text.
+      2. If a single unambiguous match → return directly (skip LLM).
+      3. Otherwise, call LLM with optional keyword hints.
+      4. Compare LLM result vs keyword result — if they disagree,
+         retry with expanded context (more pages, more chars) and an
+         arbitration prompt.  This uses a real ambiguity signal rather
+         than trusting LLM self-reported confidence.
 
     Args:
         extracted_text: Output from ingestion.extract_text_from_pdf()
@@ -163,36 +270,21 @@ async def classify_document(
     """
     name_part = filename or "document"
     total_pages = extracted_text.get("total_pages", "?")
+    all_pages = extracted_text.get("pages", [])
 
-    # Select the best 2 pages for classification.
-    # Prefer Sarvam-OCR'd pages (high-quality Tamil) over raw pdfplumber,
-    # and HIGH-quality pages over LOW/garbled ones.  This ensures the
-    # classifier sees clean text even when some pages are CID-garbled.
-    pages = _select_best_pages(extracted_text.get("pages", []), max_pages=2)
+    # ── Phase 1: Prepare text from best pages ──
+    pages = _select_best_pages(all_pages, max_pages=CLASSIFY_MAX_PAGES)
     sample_text = "\n\n".join(p["text"] for p in pages if p.get("text"))
-
-    # Strip (cid:XX) font-encoding placeholders — these indicate the PDF
-    # uses CID-encoded fonts that pdfplumber cannot resolve.  Removing
-    # them turns garbled "ப(cid:39)டா எ(cid:23):" into "படா எ:" which,
-    # while imperfect, lets Tamil keywords become recognisable.
     sample_text = _strip_cid_placeholders(sample_text)
-
-    # Collapse excessive repetitions (OCR artefacts like "(R) (R) (R)...")
     sample_text = _collapse_repetitions(sample_text)
-
-    # Remove high-frequency non-adjacent repeated tokens (Tamil table rows)
     sample_text = _dedup_high_freq_tokens(sample_text)
 
-    # Cap sample size — classification only needs header/title text.
-    # Large pages (e.g. 68-page EC with 168K chars from 2 pages) overwhelm
-    # the 64K context window, leaving no room for output tokens.
-    _CLASSIFY_MAX_CHARS = 4000
-    if len(sample_text) > _CLASSIFY_MAX_CHARS:
+    if len(sample_text) > CLASSIFY_MAX_CHARS:
         logger.info(
             f"[{name_part}] Classification sample truncated: "
-            f"{len(sample_text):,} → {_CLASSIFY_MAX_CHARS:,} chars"
+            f"{len(sample_text):,} → {CLASSIFY_MAX_CHARS:,} chars"
         )
-        sample_text = sample_text[:_CLASSIFY_MAX_CHARS]
+        sample_text = sample_text[:CLASSIFY_MAX_CHARS]
 
     if not sample_text.strip():
         return {
@@ -201,22 +293,130 @@ async def classify_document(
             "language": "unknown",
             "key_identifiers": [],
             "reasoning": "No text could be extracted for classification.",
+            "keyword_classification": None,
         }
 
+    # ── Phase 2: Keyword pre-classifier ──
+    kw_single, kw_matches = _get_keyword_hints(sample_text, filename)
+
+    if kw_single:
+        # Unambiguous keyword match — skip LLM entirely
+        logger.info(f"[{name_part}] Keyword pre-classifier: {kw_single} (skipping LLM)")
+        if on_progress:
+            await on_progress("classify", f"{name_part}: keyword match → {kw_single}", {
+                "type": "classify_keyword_match",
+                "filename": filename,
+                "document_type": kw_single,
+            })
+        return {
+            "document_type": kw_single,
+            "confidence": 0.85,
+            "language": "tamil_english",
+            "key_identifiers": [],
+            "reasoning": f"Deterministic keyword match: {kw_single}",
+            "keyword_classification": kw_single,
+        }
+
+    # ── Phase 3: LLM classification ──
     system_prompt = _load_prompt("classify")
+
+    # Include filename and keyword hints in prompt if available
+    prompt_parts = []
+    if filename:
+        prompt_parts.append(f"Document filename: {filename}")
+    if len(kw_matches) > 1:
+        prompt_parts.append(
+            f"Keyword analysis suggests possible types: {', '.join(kw_matches)}. "
+            "Use these as hints but classify based on the actual content."
+        )
+    prompt_parts.append(f"Classify this document:\n\n{sample_text}")
+    prompt = "\n\n".join(prompt_parts)
+
     result = await call_llm(
-        prompt=f"Classify this document:\n\n{sample_text}",
+        prompt=prompt,
         system_prompt=system_prompt,
         expect_json=CLASSIFY_SCHEMA,
         task_label=f"Classify {name_part} ({total_pages}p, {len(sample_text):,} chars)",
         on_progress=on_progress,
-        think=True,
-        max_tokens=2048,
+        think=False,
+        max_tokens=CLASSIFY_MAX_TOKENS,
     )
 
-    from app.config import DOCUMENT_TYPES
     if result.get("document_type") not in DOCUMENT_TYPES:
         result["document_type"] = "OTHER"
+
+    # Store keyword classification for downstream comparison
+    result["keyword_classification"] = kw_matches[0] if len(kw_matches) == 1 else (
+        kw_matches if kw_matches else None
+    )
+
+    # ── Phase 4: Disagreement-triggered retry ──
+    # If keywords found matches and the LLM disagrees, retry with expanded
+    # context.  This uses a real ambiguity signal instead of trusting the
+    # LLM's self-reported confidence number.
+    llm_type = result.get("document_type", "OTHER")
+    llm_conf = result.get("confidence", 0)
+    if isinstance(llm_conf, str):
+        try:
+            llm_conf = float(llm_conf)
+        except (ValueError, TypeError):
+            llm_conf = 0
+
+    # Retry conditions:
+    #   A) Keywords matched something but LLM disagrees (not OTHER)
+    #   B) LLM says OTHER with low confidence and more pages are available
+    needs_retry = (
+        (kw_matches and llm_type not in kw_matches and llm_type != "OTHER")
+        or (llm_type == "OTHER" and llm_conf < 0.80
+            and len(all_pages) > CLASSIFY_MAX_PAGES)
+    )
+    if needs_retry:
+        logger.info(
+            f"[{name_part}] Classification disagreement: "
+            f"keywords={kw_matches}, LLM={llm_type} — retrying with expanded context"
+        )
+        # Expand to more pages + more chars
+        retry_pages = _select_best_pages(all_pages, max_pages=CLASSIFY_RETRY_MAX_PAGES)
+        retry_text = "\n\n".join(p["text"] for p in retry_pages if p.get("text"))
+        retry_text = _strip_cid_placeholders(retry_text)
+        retry_text = _collapse_repetitions(retry_text)
+        retry_text = _dedup_high_freq_tokens(retry_text)
+        if len(retry_text) > CLASSIFY_RETRY_MAX_CHARS:
+            retry_text = retry_text[:CLASSIFY_RETRY_MAX_CHARS]
+
+        arbitration_prompt = (
+            f"Document filename: {filename}\n\n"
+            f"CLASSIFICATION DISAGREEMENT — please arbitrate:\n"
+            f"- Keyword analysis suggests: {', '.join(kw_matches)}\n"
+            f"- Initial classification was: {llm_type}\n\n"
+            f"With this expanded context ({len(retry_pages)} pages, "
+            f"{len(retry_text):,} chars), determine the correct document type.\n\n"
+            f"Classify this document:\n\n{retry_text}"
+        )
+
+        retry_result = await call_llm(
+            prompt=arbitration_prompt,
+            system_prompt=system_prompt,
+            expect_json=CLASSIFY_SCHEMA,
+            task_label=f"Classify {name_part} retry ({len(retry_pages)}p, {len(retry_text):,} chars)",
+            on_progress=on_progress,
+            think=False,
+            max_tokens=CLASSIFY_MAX_TOKENS,
+        )
+
+        if retry_result.get("document_type") not in DOCUMENT_TYPES:
+            retry_result["document_type"] = "OTHER"
+
+        retry_type = retry_result.get("document_type", "OTHER")
+        logger.info(
+            f"[{name_part}] Retry classification: {retry_type} "
+            f"(was {llm_type}, keywords={kw_matches})"
+        )
+        # Use retry result — the LLM with more context is the final arbiter
+        result = retry_result
+        result["keyword_classification"] = kw_matches
+        result["classification_retried"] = True
+        result["original_classification"] = llm_type
 
     # Defensive: cap & deduplicate key_identifiers
     ids = result.get("key_identifiers", [])

@@ -24,9 +24,14 @@ SELLER DETAILS (விற்பனையாளர்):
 - S/o = மகன், D/o = மகள், W/o = மனைவி
 - JOINT SELLERS: "திரு. X அவர்கள் மனைவி திருமதி. Y" = X AND Y are BOTH sellers, list separately.
   Each person with a PAN is a separate entry. Count signatures to verify all parties are listed.
+- seller[].aadhaar: 12-digit Aadhaar number (ஆதார் எண்) if visible. Strip spaces.
+- seller[].share_percentage: Ownership share if mentioned (e.g. "50%", "1/3rd", "பங்கு")
+- seller[].identification_proof: Other ID proof besides PAN/Aadhaar
+- seller[].relationship: Relationship to other parties (e.g. "wife of Seller 1")
 
 BUYER DETAILS (வாங்குபவர்):
 - Read ALL buyer names similarly with father_name, age, address
+- buyer[].aadhaar, buyer[].share_percentage, buyer[].identification_proof, buyer[].relationship
 
 PROPERTY SCHEDULE (சொத்து விவரம்):
 - survey_number: Survey number with subdivision (புல எண் / S.F.No. / T.S.No. / R.S.No.)
@@ -36,6 +41,11 @@ PROPERTY SCHEDULE (சொத்து விவரம்):
 - extent: Total land area with units — read CAREFULLY from the schedule
 - boundaries: North (வடக்கு), South (தெற்கு), East (கிழக்கு), West (மேற்கு)
 - property_type: Residential/Agricultural/Commercial/Industrial
+- land_classification: Look in the schedule table "வகை" column — Wet (நன்சை/Nanjai), Dry (புன்சை/Punjai), Maidan, Garden, or Unknown
+- plot_number: Plot/sub-division number if this is a layout/plotted development
+- door_number: PROPERTY door number (கதவு எண்) in the schedule — NOT party address
+- measurement_reference: FMB/sketch reference if mentioned
+- assessment_number: Municipal assessment/property tax number if mentioned
 
 PROPERTY SCHEDULE TABLE STRUCTURE:
 The property schedule is typically a table with these columns:
@@ -48,6 +58,20 @@ The property schedule is typically a table with these columns:
 | Boundaries | எல்லைகள் | North/South/East/West boundaries |
 
 Read each column carefully. The schedule may span multiple pages — check all pages.
+
+STAMP PAPER DETAILS:
+- stamp_paper.serial_numbers: ALL serial numbers visible on stamp paper pages (e.g. "A 123456")
+- stamp_paper.vendor_name: Stamp vendor name from the stamp paper header
+- stamp_paper.denomination_per_sheet: Per-sheet amount in rupees
+- stamp_paper.sheet_count: Count of physical stamp sheets
+- stamp_paper.total_stamp_value: denomination × sheet_count
+
+REGISTRATION DETAILS (from SRO endorsement stamp — usually on last pages):
+- registration_details.book_number: Book number (e.g. "Book 1")
+- registration_details.volume_number: Volume number if visible
+- registration_details.page_number: Page number in registration record
+- registration_details.certified_copy_number: If this is a certified copy
+- registration_details.certified_copy_date: Date of certified copy issuance (NOT registration date)
 
 FINANCIAL DETAILS:
 - consideration_amount: Sale price in ₹ (விற்பனை தொகை) — the TOTAL sale price.
@@ -62,10 +86,28 @@ PREVIOUS OWNERSHIP:
 - Previous owner name
 - How seller acquired: Sale/Gift/Inheritance/Partition/Settlement
 
-WITNESSES (சாட்சிகள்):
-- List all witness names
+OWNERSHIP HISTORY (FULL CHAIN — STORY OF THE LAND):
+Tamil sale deeds contain recitals ("இந்தச் சொத்து வரலாறு") that trace the property
+through 2-3 generations of prior owners. This is the STORY OF THE LAND.
+For EACH prior transfer mentioned in the recitals, extract:
+- ownership_history[].owner: Person who held the property
+- ownership_history[].acquired_from: Who they got it from
+- ownership_history[].acquisition_mode: Sale/Gift/Inheritance/Partition/Settlement/Unknown
+- ownership_history[].document_number: Deed number for that transfer
+- ownership_history[].document_date: Date of that transfer (YYYY-MM-DD)
+- ownership_history[].remarks: Notable details (e.g. "Original patta holder", "Government grant")
+Sort chronologically — OLDEST first. The LAST entry should be the current seller acquiring.
+Do NOT include the current buyers as ownership_history entries.
+Look for keywords: "கிரையம்" (sale), "வாரிசு" (inheritance), "பாகப்பிரிவினை" (partition), "தானம்" (gift)
+
+WITNESSES (சாட்சிகள்) — STRUCTURED:
+- witnesses[].name: Full name of each witness
+- witnesses[].father_name: Father/husband name (S/o, D/o, W/o) if visible
+- witnesses[].age: Age if mentioned
+- witnesses[].address: Address if mentioned
 - Prefer PRINTED text over handwritten signatures (handwritten names may be garbled by OCR)
 - If a name is partially illegible, note "[partially illegible]" — do NOT include garbled character sequences
+- If only a name is readable, return {"name": "...", "father_name": "", "age": "", "address": ""}
 
 SPECIAL CONDITIONS:
 - Any restrictions, covenants, easements, or special clauses
@@ -82,5 +124,9 @@ CRITICAL:
 - The property schedule is usually on page 2 or later — do NOT skip it.
 - Boundary details are legally critical — extract them precisely.
 - If text is partially illegible, extract what you CAN read and note "[partially illegible]".
+
+PER-FIELD CONFIDENCE: In "_field_confidence", list any field where you are less than 90% confident in the extracted value. Use the field name as key and confidence (0.0-1.0) as value.
+
+EXTRACTION RED FLAGS: In "_extraction_red_flags", list ANY suspicious patterns, anomalies, or concerns you notice in the document. Examples: consideration below guideline value, GPA-based sale, minor as party, inconsistent boundaries, ownership history gaps, missing witness, stamp duty shortfall, partially illegible key sections.
 
 Return ONLY valid JSON matching the required schema.

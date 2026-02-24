@@ -6,6 +6,8 @@ import type {
   SessionData,
   SessionsResponse,
   LLMHealthResponse,
+  ChatMessage,
+  ChatStreamEvent,
 } from './types';
 
 const BASE = '/api';
@@ -95,9 +97,39 @@ export function streamAnalysis(
 }
 
 export async function getResults(sessionId: string): Promise<SessionData> {
-  const res = await fetchWithRetry(`${BASE}/analyze/${sessionId}/results`);
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
+  // Delay slightly before first attempt — gives Windows Defender / antivirus
+  // time to release file locks on the freshly-written session JSON.
+  await new Promise(r => setTimeout(r, 500));
+
+  // More aggressive retries than the generic fetchWithRetry:
+  // 5 total attempts with 1 s exponential backoff (≈ 15 s total).
+  const maxRetries = 4;
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const res = await fetch(`${BASE}/analyze/${sessionId}/results`);
+      if (res.status >= 500 && attempt < maxRetries) {
+        console.warn(`[HATAD] getResults attempt ${attempt + 1}/${maxRetries + 1} got ${res.status} — retrying`);
+        await new Promise(r => setTimeout(r, 1000 * 2 ** attempt));
+        continue;
+      }
+      if (res.status === 503 && attempt < maxRetries) {
+        // Backend's retry-on-read says file is still locked — wait longer
+        console.warn(`[HATAD] getResults attempt ${attempt + 1}/${maxRetries + 1} got 503 — retrying`);
+        await new Promise(r => setTimeout(r, 1500 * 2 ** attempt));
+        continue;
+      }
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    } catch (err) {
+      lastError = err;
+      if (attempt < maxRetries) {
+        console.warn(`[HATAD] getResults attempt ${attempt + 1}/${maxRetries + 1} failed:`, err);
+        await new Promise(r => setTimeout(r, 1000 * 2 ** attempt));
+      }
+    }
+  }
+  throw lastError;
 }
 
 export async function getSessions(): Promise<SessionsResponse> {
@@ -121,4 +153,83 @@ export function getReportPdfUrl(sessionId: string): string {
 
 export function getReportHtmlUrl(sessionId: string): string {
   return `${BASE}/analyze/${sessionId}/report/html`;
+}
+
+// ── Chat streaming (POST-based SSE via fetch + ReadableStream) ──
+
+export async function streamChat(
+  sessionId: string,
+  message: string,
+  history: { role: string; content: string }[],
+  onToken: (token: string) => void,
+  onThinking: (chunk: string) => void,
+  onDone: (fullContent: string) => void,
+  onError: (error: string) => void,
+): Promise<AbortController> {
+  const controller = new AbortController();
+
+  (async () => {
+    try {
+      const res = await fetch(`${BASE}/analyze/${sessionId}/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message, history }),
+        signal: controller.signal,
+      });
+
+      if (!res.ok) {
+        const text = await res.text();
+        onError(text || `HTTP ${res.status}`);
+        return;
+      }
+
+      const reader = res.body?.getReader();
+      if (!reader) {
+        onError('No response body');
+        return;
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        // Process complete SSE lines
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith('data: ')) continue;
+          const jsonStr = trimmed.slice(6);
+          try {
+            const evt: ChatStreamEvent = JSON.parse(jsonStr);
+            if (evt.error) {
+              onError(evt.error);
+              return;
+            }
+            if (evt.thinking) {
+              onThinking(evt.thinking);
+            }
+            if (evt.token) {
+              onToken(evt.token);
+            }
+            if (evt.done && evt.content !== undefined) {
+              onDone(evt.content);
+              return;
+            }
+          } catch { /* skip malformed lines */ }
+        }
+      }
+    } catch (err: any) {
+      if (err.name !== 'AbortError') {
+        onError(err.message || 'Chat stream failed');
+      }
+    }
+  })();
+
+  return controller;
 }

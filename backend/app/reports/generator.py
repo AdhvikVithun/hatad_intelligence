@@ -13,11 +13,208 @@ from pathlib import Path
 from datetime import datetime
 
 from jinja2 import ChainableUndefined, Environment, FileSystemLoader
-from playwright.sync_api import sync_playwright
+from markupsafe import Markup
+import mistune
 
 from app.config import TEMPLATES_DIR, REPORTS_DIR, RISK_BANDS
 
+import re as _re
+
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Text sanitisation — strip ALL pipeline / LLM internals for exec report
+# ---------------------------------------------------------------------------
+
+# Pass 1 — Self-Reflection amendment blocks (always appended at end)
+_RE_SELF_REFLECT = _re.compile(
+    r'\n*\[Self-Reflection Amendment\].*', _re.DOTALL,
+)
+
+# Pass 2 — LLM padding stubs
+_RE_LLM_PADDING = _re.compile(
+    r'LLM did not evaluate this check\s*[-—–]?\s*'
+    r'insufficient document data or check was skipped\.?',
+    _re.IGNORECASE,
+)
+
+# Pass 3 — Internal filenames
+# Bracketed:  [filename_HEX.pdf]  or  [filename_HEX.pdf p.2]
+_RE_FILE_BRACKET = _re.compile(
+    r'\[[^\]]*[A-Fa-f0-9_-]{8,}\.pdf[^\]]*\]',
+)
+# "In FILENAME.pdf, " prefix — require filename chars (no spaces) right after "In "
+_RE_FILE_IN_PREFIX = _re.compile(
+    r'\bIn\s+\S*[A-Fa-f0-9_-]{8,}\.pdf\s*,\s*',
+)
+# Bare filename (NO spaces/parens — just word chars, underscores, hyphens)
+_RE_FILE_BARE = _re.compile(
+    r'\b[A-Za-z0-9_-]*[A-Fa-f0-9_-]{8,}\.pdf\b',
+)
+
+# Pass 4 — Identity evidence lines (✓ / → lines and header)
+_RE_IDENTITY_LINES = _re.compile(
+    r'(?:^|\n)\s*[✓→]\s*[^\n]*', _re.MULTILINE,
+)
+_RE_IDENTITY_HEADER = _re.compile(
+    r'Identity Match:\s*[^\n]*resolved to the same person[^\n]*',
+)
+_RE_IDENTITY_XREF = _re.compile(
+    r'(?:Buyer|Seller|EC Claimant)\s*↔\s*Patta:[^\n]*',
+)
+
+# Pass 5 — DET check references
+_RE_DET_FULL = _re.compile(
+    r'Deterministic check\s+DET_\w+\s*\([A-Z_/]+\)\s*',
+    _re.IGNORECASE,
+)
+_RE_DET_BARE = _re.compile(r'\bDET_\w+\b')
+
+# Pass 6 — Internal terminology
+_RE_NORMALIZED = _re.compile(r'\(normalized:\s*[^)]*\)')
+_RE_GARBLED = _re.compile(r'\[garbled OCR\]', _re.IGNORECASE)
+_RE_TOOL_NAMES = _re.compile(
+    r'\b(?:query_knowledge_base|search_documents)\b[^.]*',
+)
+_RE_CONFIDENCE_BAND = _re.compile(
+    r'\(Confidence:\s*\d+%\s*[-—–]\s*\w+\)',
+)
+_RE_ISSUE_TAGS = _re.compile(
+    r'\[(?:STATUS_EVIDENCE_CONTRADICTION|CROSS_GROUP_CONTRADICTION'
+    r'|SEVERITY_UNDERESTIMATION|EVIDENCE_QUALITY)[^\]]*\]',
+)
+_RE_CONTRADICTION_SENT = _re.compile(
+    r'This creates a (?:cross-group|status[- ]evidence) contradiction[^.]*\.?\s*',
+    _re.IGNORECASE,
+)
+_RE_LLM_CHECK_REF = _re.compile(
+    r'The LLM check\s+[^.]*\.\s*', _re.IGNORECASE,
+)
+
+# Pass 7 — Group references: "(Group 1)" but NOT "survey number groups"
+_RE_GROUP_PAREN = _re.compile(r'\(Group\s+\d+\)', _re.IGNORECASE)
+
+# Cleanup patterns
+_RE_MULTI_SPACE = _re.compile(r'  +')
+_RE_ORPHAN_PARENS = _re.compile(r'\(\s*[,and ]*\s*\)')
+_RE_ORPHAN_VS = _re.compile(r'\bvs\s*\(\s*\)')
+_RE_MULTI_NEWLINE = _re.compile(r'\n{3,}')
+_RE_LEADING_CONNECTORS = _re.compile(
+    r'(?:^|\n)\s*(?:and|vs)\s*(?=[.\n])', _re.IGNORECASE,
+)
+_RE_SPACE_BEFORE_PUNCT = _re.compile(r'\s+([.,;:])')
+
+
+def _strip_paren_pdf_refs(text: str) -> str:
+    """Remove any (...) group whose content contains '.pdf'.
+
+    Uses a depth-tracking state machine so nested parens such as
+    ``(download (4)_766e8f4386a3.pdf)`` are handled correctly.
+    """
+    result: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] == '(':
+            # Walk forward tracking depth to find matching ')'
+            depth = 1
+            j = i + 1
+            while j < n and depth > 0:
+                if text[j] == '(':
+                    depth += 1
+                elif text[j] == ')':
+                    depth -= 1
+                j += 1
+            group = text[i:j]  # includes outer ( and )
+            if '.pdf' in group.lower():
+                # Trim trailing whitespace that preceded the opening paren
+                while result and result[-1] == ' ':
+                    result.pop()
+                i = j
+                continue
+            # Not a PDF ref — keep the paren group as-is
+            result.append(text[i])
+            i += 1
+        else:
+            result.append(text[i])
+            i += 1
+    return ''.join(result)
+
+
+def _sanitize_explanation(text: str) -> str:
+    """Strip ALL pipeline / LLM internals from check explanation text.
+
+    Operates in sequential passes so earlier removals (like the entire
+    Self-Reflection block) prevent later patterns from partially matching
+    on already-removed content.
+    """
+    if not text:
+        return text
+
+    out = text
+
+    # 1 — Strip self-reflection amendment blocks (everything after tag)
+    out = _RE_SELF_REFLECT.sub('', out)
+
+    # 2 — Humanise LLM padding stubs
+    out = _RE_LLM_PADDING.sub(
+        'This check was not evaluated due to insufficient document data.', out,
+    )
+
+    # 3 — Strip internal filenames
+    #     a) Bracketed  [filename.pdf]
+    out = _RE_FILE_BRACKET.sub('', out)
+    #     b) Parenthesised (filename.pdf) — state machine for nested parens
+    out = _strip_paren_pdf_refs(out)
+    #     c) "In filename.pdf, " prefix
+    out = _RE_FILE_IN_PREFIX.sub('', out)
+    #     d) Bare filename (no spaces)
+    out = _RE_FILE_BARE.sub('', out)
+
+    # 4 — Strip identity evidence blocks
+    out = _RE_IDENTITY_LINES.sub('', out)
+    out = _RE_IDENTITY_HEADER.sub('', out)
+    out = _RE_IDENTITY_XREF.sub('', out)
+
+    # 5 — Strip DET references
+    out = _RE_DET_FULL.sub('', out)
+    out = _RE_DET_BARE.sub('', out)
+
+    # 6 — Strip internal terminology
+    out = _RE_NORMALIZED.sub('', out)
+    out = _RE_GARBLED.sub('', out)
+    out = _RE_TOOL_NAMES.sub('', out)
+    out = _RE_CONFIDENCE_BAND.sub('', out)
+    out = _RE_ISSUE_TAGS.sub('', out)
+    out = _RE_CONTRADICTION_SENT.sub('', out)
+    out = _RE_LLM_CHECK_REF.sub('', out)
+
+    # 7 — Strip group references like (Group 1)
+    out = _RE_GROUP_PAREN.sub('', out)
+
+    # 8 — Humanise OCR language
+    out = out.replace('OCR garble or extraction error',
+                      'data entry or scanning error')
+
+    # 9 — Cleanup
+    out = _RE_ORPHAN_PARENS.sub('', out)
+    out = _RE_ORPHAN_VS.sub('', out)
+    out = _RE_LEADING_CONNECTORS.sub('', out)
+    out = _RE_SPACE_BEFORE_PUNCT.sub(r'\1', out)
+    out = _RE_MULTI_SPACE.sub(' ', out)
+    out = _RE_MULTI_NEWLINE.sub('\n\n', out)
+    out = out.strip()
+
+    return out
+
+# Markdown → HTML converter for narrative reports in PDF
+_md = mistune.create_markdown(plugins=['table', 'strikethrough'])
+
+def _markdown_filter(text: str) -> Markup:
+    """Jinja2 filter: convert Markdown text to safe HTML."""
+    if not text:
+        return Markup('')
+    return Markup(_md(text))
 
 # Jinja2 environment for HTML template rendering
 # ChainableUndefined allows safe nested attribute access (a.b.c) —
@@ -27,6 +224,7 @@ _env = Environment(
     autoescape=True,
     undefined=ChainableUndefined,
 )
+_env.filters['markdown'] = _markdown_filter
 
 
 # -----------------------------------------------
@@ -325,24 +523,63 @@ def _extract_sale_deed_details(session_data: dict) -> dict | None:
 # Playwright HTML → PDF (sync, run in a thread from async code)
 # -----------------------------------------------
 
+_MAX_PLAYWRIGHT_RETRIES = 3
+
+
 def _playwright_html_to_pdf(html_path: Path, pdf_path: Path) -> None:
     """Convert an HTML file to PDF using Playwright Chromium.
 
     This is a **sync** function that must NOT be called from inside an
-    asyncio event-loop directly.  Use :func:`generate_pdf_report_async`
-    from async endpoints.
+    asyncio event-loop directly.  The calling code should run it in a
+    :class:`concurrent.futures.ProcessPoolExecutor` so Playwright gets
+    its own clean process.
+
+    Includes retry logic to handle transient ``TargetClosedError`` on
+    Windows where the Chromium subprocess occasionally fails on first
+    launch.
     """
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch()
-        page = browser.new_page()
-        page.goto(html_path.as_uri(), wait_until="networkidle")
-        page.pdf(
-            path=str(pdf_path),
-            format="A4",
-            print_background=True,
-            margin={"top": "0", "right": "0", "bottom": "0", "left": "0"},
-        )
-        browser.close()
+    from playwright.sync_api import sync_playwright
+
+    last_err: Exception | None = None
+    for attempt in range(1, _MAX_PLAYWRIGHT_RETRIES + 1):
+        try:
+            with sync_playwright() as pw:
+                browser = pw.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--no-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-gpu",
+                    ],
+                )
+                try:
+                    page = browser.new_page()
+                    page.goto(html_path.as_uri(), wait_until="networkidle")
+                    page.pdf(
+                        path=str(pdf_path),
+                        format="A4",
+                        print_background=True,
+                        margin={
+                            "top": "0",
+                            "right": "0",
+                            "bottom": "0",
+                            "left": "0",
+                        },
+                    )
+                finally:
+                    browser.close()
+            return  # success
+        except Exception as exc:
+            last_err = exc
+            logger.warning(
+                "Playwright PDF attempt %d/%d failed: %s",
+                attempt,
+                _MAX_PLAYWRIGHT_RETRIES,
+                exc,
+            )
+    raise RuntimeError(
+        f"Playwright PDF generation failed after {_MAX_PLAYWRIGHT_RETRIES} attempts"
+    ) from last_err
 
 
 # -----------------------------------------------
@@ -366,6 +603,14 @@ def generate_pdf_report(session_data: dict) -> Path:
         band_info = RISK_BANDS.get(risk_band, RISK_BANDS["MEDIUM"])
         verification = session_data.get("verification_result", {})
         checks = verification.get("checks", [])
+
+        # Sanitize check explanations for executive report — strip
+        # internal filenames, hashes, and pipeline references.
+        for ck in checks:
+            if ck.get("explanation"):
+                ck["explanation"] = _sanitize_explanation(ck["explanation"])
+            if ck.get("recommendation"):
+                ck["recommendation"] = _sanitize_explanation(ck["recommendation"])
 
         # Property summary for the property identification block
         prop = _extract_property_summary(session_data)

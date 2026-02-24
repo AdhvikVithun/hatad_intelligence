@@ -145,6 +145,7 @@ export interface SessionData {
   } | null;
   identity_clusters: IdentityCluster[] | null;
   narrative_report: string | null;
+  chat_history?: ChatMessage[];
   progress: ProgressEntry[];
 }
 
@@ -211,6 +212,24 @@ export const VERIFY_GROUPS = [
 ] as const;
 
 export type TabId = 'pipeline' | 'log' | 'summary' | 'checks' | 'chain' | 'transactions' | 'identity' | 'knowledge' | 'report';
+
+// ── Chat types ──────────────────────────────────
+
+export interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  thinking?: string;
+  timestamp: string;
+  streaming?: boolean;
+}
+
+export interface ChatStreamEvent {
+  token?: string;
+  thinking?: string;
+  done?: boolean;
+  content?: string;
+  error?: string;
+}
 
 export interface IdentityMention {
   name: string;
